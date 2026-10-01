@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"discord-automation/internal/model"
 	"github.com/chromedp/chromedp"
@@ -37,10 +38,28 @@ func New(endpoint string) (*CDP, error) {
 	}
 	return &CDP{Endpoint: endpoint}, nil
 }
-func (b *CDP) Open(ctx context.Context, target string) (model.Snapshot, error) {
+func validateTarget(target string) error {
 	u, err := url.Parse(target)
-	if err != nil || u.Scheme != "https" || u.Host != "discord.com" || !strings.HasPrefix(u.Path, "/channels/") {
-		return model.Snapshot{}, fmt.Errorf("only Discord channel URLs are allowed")
+	if err != nil || u.Scheme != "https" || u.Host != "discord.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("only generated Discord server/channel URLs are allowed")
+	}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] != "channels" {
+		return fmt.Errorf("invalid Discord channel path")
+	}
+	for _, id := range parts[1:] {
+		if err := model.ValidateID(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (b *CDP) Open(ctx context.Context, target string) (model.Snapshot, error) {
+	if err := validateTarget(target); err != nil {
+		return model.Snapshot{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return model.Snapshot{}, err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -55,15 +74,11 @@ func (b *CDP) Open(ctx context.Context, target string) (model.Snapshot, error) {
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
 	var snap model.Snapshot
-	err = chromedp.Run(op, chromedp.Navigate(target),
+	err := chromedp.Run(op, chromedp.Navigate(target),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Poll(observeJS, &snap, chromedp.WithPollingInterval(250000000)))
-	// Poll above yields the observation immediately. Core verifies UI with repeated reads below.
-	if err == nil {
-		err = chromedp.Run(op, chromedp.Poll(
+		chromedp.Poll(
 			`(() => { const s = `+observeJS+`; return s.selected_channel_id || s.heading ? s : false; })()`,
-			&snap, chromedp.WithPollingInterval(250000000)))
-	}
+			&snap, chromedp.WithPollingInterval(250*time.Millisecond)))
 	if err != nil {
 		return snap, fmt.Errorf("Chrome observation failed (check login, permissions and CDP): %w", err)
 	}

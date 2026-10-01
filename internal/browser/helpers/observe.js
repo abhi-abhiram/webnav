@@ -19,7 +19,7 @@
       selectedChannelID = match[2];
     }
   }
-  const heading = [...document.querySelectorAll('main h1, main h2, [role="main"] [role="heading"]')]
+  const heading = [...document.querySelectorAll('main header h1, main header h2, [role="main"] header [role="heading"], [aria-label="Channel header"] h1, [aria-label="Channel header"] h2, [aria-label="Channel header"] [role="heading"]')]
     .find(visible);
   return {
     url: location.href,
