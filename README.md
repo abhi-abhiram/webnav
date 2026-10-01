@@ -79,21 +79,21 @@ export async function run({ page, args, call, ui, log }) {
 }
 ```
 
-`page` is a Playwright `Page`. `call(name, args)` runs another function of the same site, and `ui` is the object exported by `ui.ts`. `meta.safe` marks functions without side effects, which `fn_check` runs as a health check.
+`page` is a Playwright `Page`. `call(name, args)` runs another function of the same site, and `ui` is the object exported by `ui.ts`. Helpers: `open(path)` / `ensureOnSite(path)` navigate relative to the site's `origin`, `items(locator, role?)` returns accessible elements as `{ role, name, url, selected, … }` objects for retrieval functions, and `escape(text)` escapes text for regex names. `meta.safe` marks functions without side effects, which `fn_check` runs as a health check (with `meta.example` args when they take params).
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
 | `browser_open` | Attach, go to a URL or back/forward/reload; returns state + snapshot |
-| `browser_snapshot` | Accessibility tree with `[ref=…]` handles |
-| `browser_act` | click, dblclick, right_click, hover, fill, type, clear, press, select, check, uncheck, upload, focus, scroll |
+| `browser_snapshot` | Accessibility tree with `[ref=…]` handles; `within`/`depth` for one part of a page |
+| `browser_act` | click, dblclick, right_click, hover, fill, type, clear, press, select, check, uncheck, upload, focus, scroll; returns only what changed by default |
 | `browser_screenshot` | Image of the page |
 | `site_list` / `site_get` | Known sites; notes, ui, functions and last runs |
 | `site_write_notes` | Replace notes (committed) |
 | `fn_read` / `fn_save` / `fn_delete` | Read, validate-and-commit, delete functions or `ui.ts` |
 | `site_history` | Git history; `fn_read` with `revision` restores old code |
-| `fn_try` | Run unsaved code |
+| `fn_try` | Run unsaved code; `save_as` saves it if the run succeeds |
 | `fn_run` | Run a function; failure details for repair; `record` for video |
 | `fn_check` | Run all `safe` functions |
 

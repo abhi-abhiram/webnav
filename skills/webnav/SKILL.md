@@ -16,32 +16,41 @@ Each site has notes (what exists, where, how to reach it), a shared `ui.ts` of l
 - Need a demo for a PR? `fn_run` with `record: true`, then attach the video, e.g. `gh pr edit <n> --attach '<video>#<caption>'`.
 
 ## 3. Explore when knowledge is missing
-- `browser_open { url }` → read the snapshot → `browser_act { ref, action }` (each act returns the new snapshot).
+- `browser_open { url }` → read the snapshot → `browser_act { ref, action }`. Each act returns only what changed (`snapshot: "full"` for everything).
+- On big pages read one part: `browser_snapshot { within: 'role=navigation[name="Main"]', depth: 3 }`.
 - If `login_suspected` is true, ask the user to sign in in their browser. Never type credentials.
 - With pi-browser-harness installed you may explore with its tools instead; webnav still runs the functions.
 - Ask before clearly destructive or outward actions (delete, pay, send, invite, publish) unless the task says to do them.
 
 ## 4. Capture knowledge
 - Update notes with `site_write_notes`: pages, how to reach them, quirks, variants seen. Keep what is still true.
-- Turn any sequence worth repeating into a function. Draft with `fn_try`, save with `fn_save` once it works.
+- Turn any sequence worth repeating into a function: `fn_try { code, args, save_as: "name" }` runs it and saves it only if it succeeds. Use `fn_save` for edits that need no run.
 
 Function shape:
 ```ts
-export const meta = { description: "Open Settings → Billing", params: { }, safe: true };
-export async function run({ page, args, call, ui, log }) {
-  await call("goHome");                                   // reuse other functions
+export const meta = { description: "Open Settings → Billing", safe: true };
+export async function run({ page, call, ui, ensureOnSite }) {
+  await ensureOnSite("/dashboard");                       // only navigates if the tab is elsewhere
   await ui.mainNav(page).getByRole("link", { name: "Settings" }).click();
   await page.getByRole("tab", { name: "Billing" }).click();
   await page.getByRole("heading", { name: "Billing" }).waitFor(); // prove the result
-  return { url: page.url() };
 }
 ```
+Retrieval functions return data. `items(locator, role?)` turns the accessibility tree into objects:
+```ts
+export const meta = { description: "List projects", safe: true };
+export async function run({ page, ensureOnSite, items }) {
+  await ensureOnSite("/projects");
+  return (await items(page.getByRole("list", { name: "Projects" }), "link")).map(l => ({ name: l.name, url: l.url }));
+}
+```
+ctx: `page`, `args`, `call(name, args)`, `ui`, `log`, `origin`, `open(path)`, `ensureOnSite(path)`, `items(locator, role?)`, `escape(text)` (for regex names). The final URL and title are reported automatically, so there's no need to return them.
 Rules of thumb:
 - Locators: `getByTestId` > `getByRole(role, { name })` > `getByLabel` > `getByText` > CSS. Never generated class names or snapshot refs.
 - Put locators used by more than one function in `ui.ts` (`export const ui = { name: (page, …) => locator }`), so a UI change is fixed once.
 - End every function with a wait that proves it worked (heading, row, toast, URL). A silent wrong success is worse than a failure.
 - Small functions that compose with `call` beat one long script. Do not import between site files; use `call` and `ui`.
-- `meta.safe: true` only for functions without side effects; `fn_check` runs those to detect drift.
+- `meta.safe: true` only for functions without side effects; `fn_check` runs those to detect drift. Give functions with params `meta.example` args so they are checked too.
 - Use `fn_save` `message` to say why something changed.
 
 ## 5. Repair when the site changed
