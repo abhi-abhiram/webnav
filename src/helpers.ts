@@ -63,3 +63,26 @@ export function navigation(page: Page, site: string) {
     },
   };
 }
+
+// Picks options in an ARIA listbox dropdown opened by `trigger`. Such listboxes are often rendered
+// outside the dialog holding the trigger and may stay open after a pick, where Escape would close
+// the dialog as well; so the dropdown is closed by toggling its trigger. The trigger's name usually
+// changes to the selection, so it is held as an element rather than re-resolved by name.
+export async function pick(trigger: Locator, options: string | RegExp | (string | RegExp)[]): Promise<void> {
+  const page = trigger.page();
+  const button = await trigger.elementHandle();
+  if (!button) throw new Error(`pick: trigger not found: ${trigger}`);
+  await button.click();
+  const controls = await button.getAttribute("aria-controls");
+  const listbox = controls ? page.locator(`[id="${controls}"]`) : page.getByRole("listbox").filter({ visible: true }).last();
+  await listbox.waitFor();
+  for (const option of [options].flat()) {
+    await listbox.getByRole("option", { name: option, exact: typeof option === "string" }).first().click();
+  }
+  if (await listbox.isVisible()) {
+    if ((await button.getAttribute("aria-expanded").catch(() => null)) === "true") await button.click();
+    else await page.locator('[aria-haspopup][aria-expanded="true"]').first().click();
+  }
+  await listbox.waitFor({ state: "hidden" });
+  await button.dispose();
+}

@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
 import { pageState, snapshot, type BrowserManager, type PageState } from "./browser.ts";
-import { escape, items, navigation } from "./helpers.ts";
+import { escape, items, navigation, pick } from "./helpers.ts";
 import { log } from "./paths.ts";
 import { siteKey, validateFunction, type FunctionContext, type SiteFunction, type Sites } from "./sites.ts";
 
@@ -73,7 +73,7 @@ export class Runner {
       const stack: string[] = [label];
       const nav = navigation(page, key);
       const context = (a: Record<string, unknown>): FunctionContext => ({
-        page, args: a, ui, site: key, call, items, escape, ...nav,
+        page, args: a, ui, site: key, call, items, escape, pick, ...nav,
         log: (...parts) => log(`${key}/${stack.at(-1)}:`, ...parts),
       });
       async function call(name: string, a: Record<string, unknown> = {}): Promise<unknown> {
