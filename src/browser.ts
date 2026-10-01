@@ -261,9 +261,14 @@ export class BrowserManager {
   }
 
   async close(): Promise<void> {
-    await this.tab?.close().catch(() => {});
-    if (this.opts.launch) await this.context?.close().catch(() => {});
-    else await this.browser?.close().catch(() => {}); // disconnects; the user's browser keeps running
+    if (this.opts.launch) {
+      await this.context?.close().catch(() => {});
+    } else {
+      // Never browser.close() on an attached browser: it can quit the user's browser.
+      // Close only our tab, and only if it is not the last one (closing the last window quits Chromium).
+      const others = this.context?.pages().filter(p => p !== this.tab && !p.isClosed()) ?? [];
+      if (others.length > 0) await this.tab?.close().catch(() => {});
+    }
     this.tab = null;
     this.context = null;
     this.browser = null;
