@@ -18,13 +18,18 @@ const text = (value: unknown, ...more: string[]): CallToolResult => ({
   ],
 });
 
-function safe<A>(fn: (args: A) => Promise<CallToolResult>): (args: A) => Promise<CallToolResult> {
-  return async args => {
+// Turns errors into tool errors and appends browser notices (things webnav did on its own).
+function guarded(notices: () => string[]) {
+  return <A>(fn: (args: A) => Promise<CallToolResult>): ((args: A) => Promise<CallToolResult>) => async args => {
+    let result: CallToolResult;
     try {
-      return await fn(args);
+      result = await fn(args);
     } catch (error) {
-      return { isError: true, content: [{ type: "text", text: (error as Error).message ?? String(error) }] };
+      result = { isError: true, content: [{ type: "text", text: (error as Error).message ?? String(error) }] };
     }
+    const pending = notices();
+    if (pending.length) result.content = [...result.content, { type: "text", text: `notices:\n- ${pending.join("\n- ")}` }];
+    return result;
   };
 }
 
@@ -34,6 +39,7 @@ const args = z.record(z.string(), z.unknown()).optional().describe("Arguments pa
 
 export function createServer({ browser, sites, runner, dataDir, browserTools }: Deps): McpServer {
   const server = new McpServer({ name: "webnav", version });
+  const safe = guarded(() => browser.takeNotices());
   const read = { readOnlyHint: true, openWorldHint: false };
   const live = { readOnlyHint: false, openWorldHint: true };
 

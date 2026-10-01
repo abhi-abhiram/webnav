@@ -286,8 +286,19 @@ export class BrowserManager {
   private userDataDir?: string;
   private profile?: string;
   private opts: BrowserOptions;
+  // Things webnav did on its own that the agent should know about; reported with the next tool result.
+  private notices: string[] = [];
   constructor(opts: BrowserOptions) {
     this.opts = opts;
+  }
+
+  private notice(message: string): void {
+    log(message);
+    this.notices.push(message);
+  }
+
+  takeNotices(): string[] {
+    return this.notices.splice(0);
   }
 
   private async connect(): Promise<BrowserContext> {
@@ -321,7 +332,14 @@ export class BrowserManager {
       if (!this.userDataDir) throw new Error("--profile-directory needs --user-data-dir when using --cdp-endpoint");
       const executable = this.opts.executable ?? findExecutable(this.userDataDir);
       if (!executable) throw new Error("browser executable not found; pass --browser-executable");
-      this.tab = await openProfileTab(context, executable, this.userDataDir, this.profile);
+      try {
+        this.tab = await openProfileTab(context, executable, this.userDataDir, this.profile);
+        this.notice(`opened a new browser window in profile "${this.profile}" (${this.userDataDir}) for webnav's tab`);
+      } catch (error) {
+        this.notice(`${(error as Error).message}; using the attached browser's default profile instead, which may have different logins`);
+        this.profile = undefined;
+        this.tab = await context.newPage();
+      }
     } else {
       this.tab = await context.newPage();
     }
@@ -331,7 +349,14 @@ export class BrowserManager {
 
   // Every browser operation runs under the shared lock.
   use<T>(fn: (page: Page) => Promise<T>, timeoutMs = 30_000): Promise<T> {
-    return withFileLock(this.opts.lockPath, timeoutMs, async () => fn(await this.page()));
+    const asked = Date.now();
+    return withFileLock(this.opts.lockPath, timeoutMs, async () => {
+      const waited = Date.now() - asked;
+      if (waited > 1_000) {
+        this.notice(`waited ${Math.round(waited / 1000)}s for another browser call to finish; the page may have changed since your last snapshot`);
+      }
+      return fn(await this.page());
+    });
   }
 
   // Switch this session to another browser. The previous browser keeps running; only our
