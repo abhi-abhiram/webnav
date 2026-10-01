@@ -22,7 +22,10 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 try {
   await client.connect(transport);
   const tools = (await client.listTools()).tools.map(t => t.name);
-  for (const t of ["browser_open", "browser_act", "site_get", "fn_save", "fn_run", "fn_try"]) assert.ok(tools.includes(t), t);
+  for (const t of ["browser_open", "browser_act", "site_get", "fn_save", "fn_run", "fn_try", "fn_status", "fn_abort"]) assert.ok(tools.includes(t), t);
+
+  assert.equal((await call("fn_status")).text, "idle");
+  assert.equal((await call("fn_abort")).text, "nothing is running");
 
   const site = "http://localhost:3000/dashboard";
   assert.equal(JSON.parse((await call("site_get", { site })).text).exists, false);
@@ -39,6 +42,10 @@ export async function run({ page }) {
   const broken = await call("fn_save", { site, name: "goToSettings", code: "export const meta = {};" });
   assert.equal(broken.error, true);
   assert.equal((await call("fn_read", { site, name: "goToSettings" })).text, fn, "invalid save must roll back");
+
+  const delegating = `export const meta = { description: "Settings via call" };
+export async function run({ call }) { return call("goToSettings"); }`;
+  assert.deepEqual(JSON.parse((await call("fn_save", { site, name: "viaCall", code: delegating })).text).warnings, []);
 
   await call("site_write_notes", { site, markdown: "# localhost_3000\n\n## Map\n- Settings: main nav\n" });
   const info = JSON.parse((await call("site_get", { site })).text);
