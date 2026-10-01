@@ -1,0 +1,14 @@
+{
+  "name": "discord-automation-skill",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Pi workflow skill for the Go Discord MCP backend",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  }
+}
