@@ -52,14 +52,33 @@ function portOpen(port: number): Promise<boolean> {
   });
 }
 
+// The browser WebSocket URL served on a debugging port, or null when the port has no HTTP
+// endpoint (chrome://inspect/#remote-debugging serves WebSocket only).
+async function liveEndpoint(port: number): Promise<string | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1_000) });
+    const url = (await res.json())?.webSocketDebuggerUrl;
+    return typeof url === "string" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 // Chrome writes DevToolsActivePort when remote debugging is on, either from
-// chrome://inspect/#remote-debugging or --remote-debugging-port.
+// chrome://inspect/#remote-debugging or --remote-debugging-port. The file outlives the
+// browser, so an open port alone does not prove it is still this profile's browser.
 async function endpointFromProfile(userDataDir: string): Promise<string | null> {
   const text = await readFile(join(userDataDir, "DevToolsActivePort"), "utf8").catch(() => null);
   if (!text) return null;
   const [port, path] = text.split("\n").map(s => s.trim());
   if (!/^\d+$/.test(port) || !path?.startsWith("/devtools/browser/")) return null;
-  return (await portOpen(Number(port))) ? `ws://127.0.0.1:${port}${path}` : null;
+  if (!(await portOpen(Number(port)))) return null;
+  const live = await liveEndpoint(Number(port));
+  if (live && new URL(live).pathname !== path) {
+    log(`ignoring stale DevToolsActivePort in ${userDataDir}: port ${port} belongs to another browser`);
+    return null;
+  }
+  return `ws://127.0.0.1:${port}${path}`;
 }
 
 export function validateEndpoint(endpoint: string): string {
