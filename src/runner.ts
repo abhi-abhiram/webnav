@@ -67,6 +67,21 @@ function compact(value: unknown): unknown {
   return text.length > 100_000 ? text.slice(0, 100_000) + "… truncated" : value;
 }
 
+// An open dialog is usually what a failed step was working in, so it leads the failure snapshot
+// and is never cut off by a long page.
+async function failureSnapshot(page: Page): Promise<string> {
+  const parts: string[] = [];
+  const dialogs = page.locator('[role="dialog"]:visible, [aria-modal="true"]:visible, dialog[open]');
+  const count = Math.min(await dialogs.count().catch(() => 0), 3);
+  for (let i = 0; i < count; i++) {
+    const tree = await dialogs.nth(i).ariaSnapshot({ mode: "ai", timeout: 5_000 }).catch(() => "");
+    if (tree) parts.push(tree.length > 6_000 ? tree.slice(0, 6_000) + "\n… truncated" : tree);
+  }
+  const pageTree = await snapshot(page, { maxChars: 6_000 }).catch(() => "");
+  if (!parts.length) return pageTree;
+  return `open dialogs:\n${parts.join("\n")}\n\npage:\n${pageTree}`;
+}
+
 export class Runner {
   private sites: Sites;
   private browser: BrowserManager;
@@ -162,7 +177,7 @@ export class Runner {
           video,
         };
         failed.state = await pageState(page).catch(() => undefined);
-        failed.snapshot = await snapshot(page, { maxChars: 6_000 }).catch(() => undefined);
+        failed.snapshot = await failureSnapshot(page);
         await mkdir(join(this.dataDir, "screenshots"), { recursive: true });
         const shot = join(this.dataDir, "screenshots", `${key}-${label}-${stamp()}.png`);
         failed.screenshot = await page.screenshot({ path: shot }).then(() => shot, () => undefined);
