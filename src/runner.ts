@@ -47,7 +47,8 @@ function compact(value: unknown): unknown {
   if (value === undefined) return undefined;
   const text = JSON.stringify(value);
   if (text === undefined) return String(value);
-  return text.length > 4000 ? text.slice(0, 4000) + "… truncated" : value;
+  // Retrieval functions return real data; only guard against runaway output.
+  return text.length > 100_000 ? text.slice(0, 100_000) + "… truncated" : value;
 }
 
 export class Runner {
