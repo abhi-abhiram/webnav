@@ -216,12 +216,27 @@ export async function snapshot(page: Page, opts: SnapshotOptions = {}): Promise<
 
 const indent = (line: string) => line.length - line.trimStart().length;
 
+// Dialogs and menus often animate in after the action's network work is done, so the tree right
+// after settle() can miss them. Poll until two consecutive trees match, within a small budget.
+async function stableTree(page: Page, budgetMs = 2_000): Promise<string> {
+  const deadline = Date.now() + budgetMs;
+  let tree = await page.ariaSnapshot({ mode: "ai", timeout: 10_000 });
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(150);
+    const next = await page.ariaSnapshot({ mode: "ai", timeout: 10_000 });
+    if (next === tree) break;
+    tree = next;
+  }
+  return tree;
+}
+
 // Lines added since the last snapshot, with their ancestor lines for context. Refs are stable
 // between snapshots, so unchanged elements produce identical lines.
 export async function snapshotChanges(page: Page, maxChars = 15_000): Promise<string> {
   const before = lastSnapshot.get(page);
-  const full = await snapshot(page, { maxChars });
-  const after = lastSnapshot.get(page) ?? "";
+  const after = await stableTree(page);
+  lastSnapshot.set(page, after);
+  const full = truncate(after, maxChars);
   if (!before) return full;
   const pool = new Map<string, number>();
   for (const line of before.split("\n")) pool.set(line, (pool.get(line) ?? 0) + 1);
