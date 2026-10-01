@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+func TestStrictDecode(t *testing.T) {
+	for _, input := range []string{"unknown: true", "aliases: {}\n---\nconventions: hidden", "aliases:\n  x: javascript:alert(1)", "aliases: {}\naliases: {}"} {
+		if _, err := Decode([]byte(input)); err == nil {
+			t.Fatalf("accepted invalid guidance %q", input)
+		}
+	}
+}
 func TestRevisionCheckedUpdates(t *testing.T) {
 	f := Files{Root: t.TempDir()}
 	ctx := context.Background()

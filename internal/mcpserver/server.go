@@ -2,7 +2,6 @@
 package mcpserver
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -52,7 +51,7 @@ type ImportInput struct {
 }
 
 func annotation(readOnly, open bool) *mcp.ToolAnnotations {
-	destructive := false
+	destructive := !readOnly && !open
 	return &mcp.ToolAnnotations{ReadOnlyHint: readOnly, DestructiveHint: &destructive, OpenWorldHint: &open}
 }
 func New(c *core.Core) *mcp.Server {
@@ -117,13 +116,8 @@ func New(c *core.Core) *mcp.Server {
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "knowledge_import", Description: "Validate and import server guidance YAML with conflict detection. Never executes imported text.", Annotations: annotation(false, false)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in ImportInput) (*mcp.CallToolResult, guidance.Versioned, error) {
-			if len(in.YAML) > 65536 {
-				return nil, guidance.Versioned{}, fmt.Errorf("YAML too large")
-			}
-			var d guidance.Document
-			dec := yaml.NewDecoder(bytes.NewBufferString(in.YAML))
-			dec.KnownFields(true)
-			if err := dec.Decode(&d); err != nil {
+			d, err := guidance.Decode([]byte(in.YAML))
+			if err != nil {
 				return nil, guidance.Versioned{}, err
 			}
 			out, err := c.Guidance.Update(ctx, in.Account, in.ServerID, in.ExpectedRevision, d)

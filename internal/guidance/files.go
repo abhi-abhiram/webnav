@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,28 @@ func Validate(d Document) error {
 	}
 	return nil
 }
+
+// Decode accepts exactly one bounded YAML document with known fields.
+func Decode(b []byte) (Document, error) {
+	var d Document
+	if len(b) > 65536 {
+		return d, fmt.Errorf("guidance file too large")
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&d); err != nil {
+		return d, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return d, fmt.Errorf("exactly one YAML document required")
+	}
+	if d.Aliases == nil {
+		d.Aliases = map[string]string{}
+	}
+	return d, Validate(d)
+}
+
 func (f Files) Get(account, server string) (Versioned, error) {
 	p, err := f.path(account, server)
 	if err != nil {
@@ -62,19 +85,8 @@ func (f Files) Get(account, server string) (Versioned, error) {
 	if err != nil {
 		return Versioned{}, err
 	}
-	if len(b) > 65536 {
-		return Versioned{}, fmt.Errorf("guidance file too large")
-	}
-	var d Document
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-	if err = dec.Decode(&d); err != nil {
-		return Versioned{}, err
-	}
-	if d.Aliases == nil {
-		d.Aliases = map[string]string{}
-	}
-	if err = Validate(d); err != nil {
+	d, err := Decode(b)
+	if err != nil {
 		return Versioned{}, err
 	}
 	return Versioned{Document: d, Revision: revision(b)}, nil

@@ -32,6 +32,15 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
+	var schemaVersion int
+	if err = db.QueryRow("PRAGMA user_version").Scan(&schemaVersion); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if schemaVersion > 1 {
+		db.Close()
+		return nil, fmt.Errorf("database schema %d is newer than supported schema 1", schemaVersion)
+	}
 	_, err = db.Exec(`
 PRAGMA busy_timeout=5000;
 PRAGMA journal_mode=WAL;
