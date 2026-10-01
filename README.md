@@ -17,7 +17,7 @@ npm run check   # typecheck
 npm run smoke   # stdio smoke run with temporary storage, no browser
 ```
 
-Enable remote debugging in the browser you normally use: open `chrome://inspect/#remote-debugging` (also `brave://inspect`, `edge://inspect`) and allow it, or start the browser with `--remote-debugging-port=9222`. webnav finds it through the `DevToolsActivePort` file in the browser's user data dir.
+Enable remote debugging in the browser you normally use: open `chrome://inspect/#remote-debugging` (also `brave://inspect`, `edge://inspect`) and allow it, or start the browser with `--remote-debugging-port=9222`. webnav finds it in this order: `--cdp-endpoint` or `WEBNAV_CDP_ENDPOINT`; the `DevToolsActivePort` file in a known user data dir (ignored when it was left by a browser that has since closed); the browser on port 9222.
 
 Add the server to your MCP client, e.g. `~/.pi/agent/mcp.json`:
 
@@ -42,12 +42,12 @@ Optionally install the workflow skill: `pi install /absolute/path/to/webnav`.
 | (none) | Attach to the one running browser that has remote debugging on. |
 | `--user-data-dir <dir>` | Pick a browser when several are running, e.g. `~/.config/chromium`. |
 | `--profile-directory "Profile 1"` | Open webnav's tab in that profile. Defaults to the profile pinned with pi-browser-harness (`/browser-profile`) when it is the same browser. |
-| `--cdp-endpoint <url>` | Explicit local `http://` or `ws://` endpoint. |
+| `--cdp-endpoint <url>` | Explicit local `http://` or `ws://` endpoint. Also read from `WEBNAV_CDP_ENDPOINT`; `browser_open { cdp_endpoint }` switches a running session. |
 | `--browser-executable <path>` | Browser binary, if it is not found automatically (used to open a window in a profile). |
 | `--launch-user-data-dir <dir>` | **Opt-in only:** launch a browser with this user data dir instead of attaching. |
 | `--no-browser-tools` | Hide `browser_*` tools, e.g. when pi-browser-harness does the exploring. |
 
-webnav opens its own tab and never reads cookies or credentials. When a page looks like a login, it reports `login_suspected` and the agent asks you to sign in.
+webnav opens its own tab and never reads cookies or credentials. When a page looks like a login, it reports `login_suspected` and the agent asks you to sign in. When webnav does something on its own, such as opening a window in a profile or falling back to the default profile because the pinned one would not open, the next tool result lists it under `notices`.
 
 ### Using it with pi-browser-harness
 
@@ -79,7 +79,7 @@ export async function run({ page, args, call, ui, log }) {
 }
 ```
 
-`page` is a Playwright `Page`. `call(name, args)` runs another function of the same site, and `ui` is the object exported by `ui.ts`. Helpers: `open(path)` / `ensureOnSite(path)` navigate relative to the site's `origin`, `items(locator, role?)` returns accessible elements as `{ role, name, url, selected, … }` objects for retrieval functions, and `escape(text)` escapes text for regex names. `meta.safe` marks functions without side effects, which `fn_check` runs as a health check (with `meta.example` args when they take params).
+`page` is a Playwright `Page`. `call(name, args)` runs another function of the same site, and `ui` is the object exported by `ui.ts`. Helpers: `open(path)` goes to that page of the site unless already there; `ensureOnSite(path)` only navigates when the tab is on another site (for steps that work from any page); `pick(trigger, options)` chooses options in a listbox dropdown and closes it even when it stays open after a pick; `items(locator, role?)` returns accessible elements as `{ role, name, url, selected, … }` objects for retrieval functions, and `escape(text)` escapes text for regex names. `meta.safe` marks functions without side effects, which `fn_check` runs as a health check (with `meta.example` args when they take params).
 
 ## Tools
 
@@ -94,7 +94,8 @@ export async function run({ page, args, call, ui, log }) {
 | `fn_read` / `fn_save` / `fn_delete` | Read, validate-and-commit, delete functions or `ui.ts` |
 | `site_history` | Git history; `fn_read` with `revision` restores old code |
 | `fn_try` | Run unsaved code; `save_as` saves it if the run succeeds |
-| `fn_run` | Run a function; failure details for repair; `record` for video |
+| `fn_run` | Run a function; failure details for repair; `record` for video; `reset` reloads first; `action_timeout_ms` fails fast |
+| `fn_status` / `fn_abort` | See what a long run is doing (URL, latest `log()` lines) / stop it |
 | `fn_check` | Run all `safe` functions |
 
 ## Trust model

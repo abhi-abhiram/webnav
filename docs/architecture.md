@@ -20,7 +20,8 @@ The server is thin. Knowledge lives in files the agent writes and maintains:
 Running a function is its own test. A failure returns the error, the failing `file:line`, page state, a trimmed accessibility snapshot, a screenshot and the functions that depend on it, which is what an agent needs to repair it.
 
 ## Browser
-- Attach only by default: an explicit endpoint, or the `DevToolsActivePort` of a running browser (found in known user data dirs, or the one given). Launching requires `--launch-user-data-dir`.
+- Attach only by default: an explicit endpoint (`--cdp-endpoint`, `WEBNAV_CDP_ENDPOINT`, or `browser_open { cdp_endpoint }` mid-session), else the `DevToolsActivePort` of a running browser (found in known user data dirs, or the one given), else port 9222. The file outlives its browser, so when the port serves `/json/version` the browser id must match. Launching requires `--launch-user-data-dir`.
+- Notices: things webnav did on its own (opened a profile window, fell back to the default profile, waited for another call) are appended to the next tool result.
 - Profiles: CDP cannot create tabs in a non-default profile, and Playwright files every page under the default context. To use a profile, webnav runs the browser binary with `--user-data-dir`, `--profile-directory` and a sentinel `file://` URL. The running instance opens that window, and webnav adopts the sentinel tab as its own. The default profile comes from the pi-browser-harness pin when it points at the same browser.
 - One dedicated tab per server process. Closing it just makes the next call open another.
 - `browser.lock` in the data dir serializes browser operations across webnav processes that share it. It does not coordinate with other tools or with a human using the same tab.
@@ -30,7 +31,9 @@ Running a function is its own test. A failure returns the error, the failing `fi
 - TypeScript runs without a build step (Node type stripping), so use only erasable syntax. Modules are imported with a content-hash query, so an edited file reloads without a restart.
 - `fn_save` imports the module to validate its shape, restores the previous file if that fails, and commits it to the site's git repo as `webnav <webnav@localhost>`.
 - The run log (`runs/<host>.jsonl`) is append-only and supplies `last_run` in `site_get`.
-- Timeouts bound the tool call. A timed-out function may still finish in the background.
+- A run stops on timeout, `fn_abort` or client cancellation. A promise cannot be cancelled, so webnav closes the run's tab: the function's pending and later Playwright calls fail, and the lock is released. The next call opens a new tab.
+- `log()` lines are kept for `fn_status` and sent as MCP progress notifications when the client asks for progress.
+- Failure snapshots list open dialogs before the page, so the part a step failed in is not cut off.
 - Recording uses `page.screencast` with action overlays.
 
 ## Not here (on purpose)
