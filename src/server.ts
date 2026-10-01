@@ -4,7 +4,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { act, actions, pageState, settle, snapshot, snapshotChanges, type BrowserManager } from "./browser.ts";
-import type { Runner } from "./runner.ts";
+import type { Runner, RunOptions } from "./runner.ts";
 import { siteKey, type Sites } from "./sites.ts";
 
 export const version = "0.1.0";
@@ -18,22 +18,54 @@ const text = (value: unknown, ...more: string[]): CallToolResult => ({
   ],
 });
 
-function safe<A>(fn: (args: A) => Promise<CallToolResult>): (args: A) => Promise<CallToolResult> {
-  return async args => {
+// Turns errors into tool errors and appends browser notices (things webnav did on its own).
+function guarded(notices: () => string[]) {
+  return <A, E>(fn: (args: A, extra: E) => Promise<CallToolResult>): ((args: A, extra: E) => Promise<CallToolResult>) => async (args, extra) => {
+    let result: CallToolResult;
     try {
-      return await fn(args);
+      result = await fn(args, extra);
     } catch (error) {
-      return { isError: true, content: [{ type: "text", text: (error as Error).message ?? String(error) }] };
+      result = { isError: true, content: [{ type: "text", text: (error as Error).message ?? String(error) }] };
     }
+    const pending = notices();
+    if (pending.length) result.content = [...result.content, { type: "text", text: `notices:\n- ${pending.join("\n- ")}` }];
+    return result;
+  };
+}
+
+type Extra = {
+  signal: AbortSignal;
+  _meta?: { progressToken?: string | number };
+  sendNotification: (notification: { method: "notifications/progress"; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void>;
+};
+
+// Cancellation and progress for long runs: a cancelled request stops the function, and each
+// ctx.log message is sent as a progress notification when the client asked for progress.
+function runControls(extra: Extra): RunOptions {
+  const token = extra._meta?.progressToken;
+  let progress = 0;
+  return {
+    signal: extra.signal,
+    onProgress: token === undefined ? undefined : message => {
+      extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++progress, message } }).catch(() => {});
+    },
   };
 }
 
 const site = z.string().describe("Site host such as app.example.com or localhost:3000, or any URL on it");
 const fnName = z.string().describe('Function name (letters, digits, _), or "ui" for the shared locator file');
 const args = z.record(z.string(), z.unknown()).optional().describe("Arguments passed to the function as ctx.args");
+const runFlags = {
+  timeout_ms: z.number().int().min(1000).max(600_000).optional()
+    .describe("Whole-run limit (default 60000). On timeout the function is stopped by closing its tab"),
+  action_timeout_ms: z.number().int().min(500).max(120_000).optional()
+    .describe("Limit for each Playwright action or wait (default 10000); lower it to fail fast"),
+  reset: z.boolean().optional().describe("Reload the page first, clearing leftover dialogs and half-filled forms"),
+};
 
 export function createServer({ browser, sites, runner, dataDir, browserTools }: Deps): McpServer {
   const server = new McpServer({ name: "webnav", version });
+  const safe = guarded(() => browser.takeNotices());
   const read = { readOnlyHint: true, openWorldHint: false };
   const live = { readOnlyHint: false, openWorldHint: true };
 
@@ -44,16 +76,21 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
         url: z.string().optional(),
         history: z.enum(["back", "forward", "reload"]).optional(),
         snapshot: z.boolean().optional().describe("Include the snapshot (default true)"),
+        cdp_endpoint: z.string().optional()
+          .describe("Switch this session to the browser at this local http:// or ws:// CDP endpoint, e.g. http://127.0.0.1:9222"),
       },
       annotations: live,
-    }, safe(async a => browser.use(async page => {
-      if (a.url) await page.goto(a.url);
-      else if (a.history === "back") await page.goBack();
-      else if (a.history === "forward") await page.goForward();
-      else if (a.history === "reload") await page.reload();
-      await settle(page);
-      return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
-    })));
+    }, safe(async a => {
+      if (a.cdp_endpoint) await browser.attachTo(a.cdp_endpoint);
+      return browser.use(async page => {
+        if (a.url) await page.goto(a.url);
+        else if (a.history === "back") await page.goBack();
+        else if (a.history === "forward") await page.goForward();
+        else if (a.history === "reload") await page.reload();
+        await settle(page);
+        return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
+      });
+    }));
 
     server.registerTool("browser_snapshot", {
       description: "Accessibility tree of the current page with [ref=…] handles for browser_act. Use within/depth to read one part of a large page. Refs stay valid until that element changes.",
@@ -149,14 +186,15 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
   server.registerTool("fn_try", {
     description: "Run unsaved function code in the browser tab. Same module shape and ctx as saved functions. With save_as, the code is saved (like fn_save) only if the run succeeds.",
     inputSchema: {
-      site, code: z.string(), args,
-      timeout_ms: z.number().int().min(1000).max(600_000).optional(),
+      site, code: z.string(), args, ...runFlags,
       save_as: z.string().optional().describe("Function name to save under when the run succeeds"),
       message: z.string().optional().describe("Commit message used with save_as"),
     },
     annotations: live,
-  }, safe(async a => {
-    const result = await runner.try(a.site, a.code, a.args, { timeoutMs: a.timeout_ms });
+  }, safe(async (a, extra: Extra) => {
+    const result = await runner.try(a.site, a.code, a.args, {
+      timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, reset: a.reset, ...runControls(extra),
+    });
     if (!result.ok || !a.save_as) return text(result);
     return text({ ...result, saved: await sites.save(a.site, a.save_as, a.code, a.message) });
   }));
@@ -164,12 +202,28 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
   server.registerTool("fn_run", {
     description: "Run a saved function in the browser tab. On failure returns the error, the failing line, page state, a snapshot, a screenshot path and dependent functions, so the function can be fixed. record=true saves a webm with a visible cursor.",
     inputSchema: {
-      site, name: z.string(), args,
-      timeout_ms: z.number().int().min(1000).max(600_000).optional(),
+      site, name: z.string(), args, ...runFlags,
       record: z.boolean().optional(),
     },
     annotations: live,
-  }, safe(async a => text(await runner.run(a.site, a.name, a.args, { timeoutMs: a.timeout_ms, record: a.record }))));
+  }, safe(async (a, extra: Extra) => text(await runner.run(a.site, a.name, a.args, {
+    timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, reset: a.reset, record: a.record, ...runControls(extra),
+  }))));
+
+  server.registerTool("fn_status", {
+    description: "What fn_run/fn_try is doing right now: function, elapsed time, current URL and its latest log() lines. Use it when a run seems stuck.",
+    inputSchema: {},
+    annotations: read,
+  }, safe(async () => text(runner.status() ?? "idle")));
+
+  server.registerTool("fn_abort", {
+    description: "Stop the running fn_run/fn_try. Its tab is closed so the function cannot keep driving the browser; the next call opens a new tab.",
+    inputSchema: {},
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  }, safe(async () => {
+    const stopped = runner.abort();
+    return text(stopped ? { stopped } : "nothing is running");
+  }));
 
   server.registerTool("fn_check", {
     description: "Run every function marked meta.safe (no arguments) to detect site changes early.",

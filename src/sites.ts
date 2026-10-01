@@ -29,6 +29,7 @@ export type FunctionContext = {
   ensureOnSite: (path?: string) => Promise<void>;
   items: (scope: Locator, role?: string | RegExp, opts?: { depth?: number }) => Promise<Item[]>;
   escape: (text: string) => string;
+  pick: (trigger: Locator, options: string | RegExp | (string | RegExp)[]) => Promise<void>;
 };
 export type SiteFunction = { meta: FunctionMeta; run: (ctx: FunctionContext) => Promise<unknown> };
 export type RunRecord = { t: string; name: string; ok: boolean; ms: number; error?: string; url?: string };
@@ -183,7 +184,8 @@ export class Sites {
       throw new Error(`not saved: ${(error as Error).message}`);
     }
     const warnings: string[] = [];
-    if (name !== "ui" && !/waitFor|expect\(|toBeVisible|toHaveURL|items\(/.test(code)) {
+    // A function that delegates with call() inherits the proof from the function it calls.
+    if (name !== "ui" && !/waitFor|expect\(|toBeVisible|toHaveURL|items\(|\bcall\(/.test(code)) {
       warnings.push("no final wait found: end with a wait that proves the result (e.g. a heading or row .waitFor())");
     }
     const verb = previous === null ? "add" : "update";

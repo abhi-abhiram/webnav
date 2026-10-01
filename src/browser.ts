@@ -23,6 +23,9 @@ export type BrowserOptions = {
 
 export type PageState = { url: string; title: string; login_suspected: boolean };
 
+// How long a single Playwright action or wait may take by default.
+export const defaultActionTimeout = 10_000;
+
 export const actions = [
   "click", "dblclick", "right_click", "hover", "fill", "type", "clear", "press",
   "select", "check", "uncheck", "upload", "focus", "scroll",
@@ -52,14 +55,33 @@ function portOpen(port: number): Promise<boolean> {
   });
 }
 
+// The browser WebSocket URL served on a debugging port, or null when the port has no HTTP
+// endpoint (chrome://inspect/#remote-debugging serves WebSocket only).
+async function liveEndpoint(port: number): Promise<string | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1_000) });
+    const url = (await res.json())?.webSocketDebuggerUrl;
+    return typeof url === "string" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 // Chrome writes DevToolsActivePort when remote debugging is on, either from
-// chrome://inspect/#remote-debugging or --remote-debugging-port.
+// chrome://inspect/#remote-debugging or --remote-debugging-port. The file outlives the
+// browser, so an open port alone does not prove it is still this profile's browser.
 async function endpointFromProfile(userDataDir: string): Promise<string | null> {
   const text = await readFile(join(userDataDir, "DevToolsActivePort"), "utf8").catch(() => null);
   if (!text) return null;
   const [port, path] = text.split("\n").map(s => s.trim());
   if (!/^\d+$/.test(port) || !path?.startsWith("/devtools/browser/")) return null;
-  return (await portOpen(Number(port))) ? `ws://127.0.0.1:${port}${path}` : null;
+  if (!(await portOpen(Number(port)))) return null;
+  const live = await liveEndpoint(Number(port));
+  if (live && new URL(live).pathname !== path) {
+    log(`ignoring stale DevToolsActivePort in ${userDataDir}: port ${port} belongs to another browser`);
+    return null;
+  }
+  return `ws://127.0.0.1:${port}${path}`;
 }
 
 export function validateEndpoint(endpoint: string): string {
@@ -89,7 +111,16 @@ async function resolveEndpoint(opts: BrowserOptions): Promise<Endpoint> {
   if (found.length > 1) {
     throw new Error(`several browsers allow remote debugging; choose one with --user-data-dir: ${found.map(f => f.dir).join(", ")}`);
   }
-  throw new Error(`no running browser found; open your usual browser and ${enable}`);
+  // A browser started with --remote-debugging-port and a custom --user-data-dir leaves no file
+  // where we look, but usually listens on the conventional port.
+  const conventional = await liveEndpoint(9222);
+  if (conventional) {
+    log("no known profile has remote debugging; using the browser on port 9222");
+    return { endpoint: validateEndpoint(conventional) };
+  }
+  throw new Error(`no running browser found; open your usual browser and ${enable}. ` +
+    "To attach to a specific browser, pass --cdp-endpoint (or set WEBNAV_CDP_ENDPOINT), " +
+    "or --user-data-dir for a browser whose profile is not in a standard location.");
 }
 
 // Reuse the profile pinned with pi-browser-harness (/browser-profile) when it is the same browser.
@@ -188,12 +219,27 @@ export async function snapshot(page: Page, opts: SnapshotOptions = {}): Promise<
 
 const indent = (line: string) => line.length - line.trimStart().length;
 
+// Dialogs and menus often animate in after the action's network work is done, so the tree right
+// after settle() can miss them. Poll until two consecutive trees match, within a small budget.
+async function stableTree(page: Page, budgetMs = 2_000): Promise<string> {
+  const deadline = Date.now() + budgetMs;
+  let tree = await page.ariaSnapshot({ mode: "ai", timeout: 10_000 });
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(150);
+    const next = await page.ariaSnapshot({ mode: "ai", timeout: 10_000 });
+    if (next === tree) break;
+    tree = next;
+  }
+  return tree;
+}
+
 // Lines added since the last snapshot, with their ancestor lines for context. Refs are stable
 // between snapshots, so unchanged elements produce identical lines.
 export async function snapshotChanges(page: Page, maxChars = 15_000): Promise<string> {
   const before = lastSnapshot.get(page);
-  const full = await snapshot(page, { maxChars });
-  const after = lastSnapshot.get(page) ?? "";
+  const after = await stableTree(page);
+  lastSnapshot.set(page, after);
+  const full = truncate(after, maxChars);
   if (!before) return full;
   const pool = new Map<string, number>();
   for (const line of before.split("\n")) pool.set(line, (pool.get(line) ?? 0) + 1);
@@ -258,8 +304,19 @@ export class BrowserManager {
   private userDataDir?: string;
   private profile?: string;
   private opts: BrowserOptions;
+  // Things webnav did on its own that the agent should know about; reported with the next tool result.
+  private notices: string[] = [];
   constructor(opts: BrowserOptions) {
     this.opts = opts;
+  }
+
+  private notice(message: string): void {
+    log(message);
+    this.notices.push(message);
+  }
+
+  takeNotices(): string[] {
+    return this.notices.splice(0);
   }
 
   private async connect(): Promise<BrowserContext> {
@@ -293,17 +350,58 @@ export class BrowserManager {
       if (!this.userDataDir) throw new Error("--profile-directory needs --user-data-dir when using --cdp-endpoint");
       const executable = this.opts.executable ?? findExecutable(this.userDataDir);
       if (!executable) throw new Error("browser executable not found; pass --browser-executable");
-      this.tab = await openProfileTab(context, executable, this.userDataDir, this.profile);
+      try {
+        this.tab = await openProfileTab(context, executable, this.userDataDir, this.profile);
+        this.notice(`opened a new browser window in profile "${this.profile}" (${this.userDataDir}) for webnav's tab`);
+      } catch (error) {
+        this.notice(`${(error as Error).message}; using the attached browser's default profile instead, which may have different logins`);
+        this.profile = undefined;
+        this.tab = await context.newPage();
+      }
     } else {
       this.tab = await context.newPage();
     }
-    this.tab.setDefaultTimeout(10_000);
+    this.tab.setDefaultTimeout(defaultActionTimeout);
     return this.tab;
   }
 
   // Every browser operation runs under the shared lock.
   use<T>(fn: (page: Page) => Promise<T>, timeoutMs = 30_000): Promise<T> {
-    return withFileLock(this.opts.lockPath, timeoutMs, async () => fn(await this.page()));
+    const asked = Date.now();
+    return withFileLock(this.opts.lockPath, timeoutMs, async () => {
+      const waited = Date.now() - asked;
+      if (waited > 1_000) {
+        this.notice(`waited ${Math.round(waited / 1000)}s for another browser call to finish; the page may have changed since your last snapshot`);
+      }
+      return fn(await this.page());
+    });
+  }
+
+  // Stops a runaway function from inside use(): its pending Playwright calls fail once the
+  // page is closed, and later ones fail at once. The next call gets a fresh tab.
+  async discardTab(): Promise<void> {
+    const tab = this.tab;
+    if (!tab || tab.isClosed()) return;
+    this.tab = null;
+    const others = this.context?.pages().filter(p => p !== tab && !p.isClosed()) ?? [];
+    // Closing the last window would quit Chromium, so keep a blank tab as ours in that case.
+    if (others.length === 0 && this.context) {
+      this.tab = await this.context.newPage();
+      this.tab.setDefaultTimeout(defaultActionTimeout);
+    }
+    await tab.close().catch(() => {});
+  }
+
+  // Switch this session to another browser. The previous browser keeps running; only our
+  // tab in it is closed (Playwright has no way to drop a CDP connection without closing).
+  async attachTo(endpoint: string): Promise<void> {
+    validateEndpoint(endpoint);
+    await withFileLock(this.opts.lockPath, 30_000, async () => {
+      await this.close();
+      this.opts = { ...this.opts, cdpEndpoint: endpoint, userDataDir: undefined, profileDirectory: undefined, launch: undefined };
+      this.profile = undefined;
+      this.userDataDir = undefined;
+    });
   }
 
   async close(): Promise<void> {

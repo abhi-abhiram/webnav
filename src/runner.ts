@@ -3,33 +3,49 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
-import { pageState, snapshot, type BrowserManager, type PageState } from "./browser.ts";
-import { escape, items, navigation } from "./helpers.ts";
+import { defaultActionTimeout, pageState, settle, snapshot, type BrowserManager, type PageState } from "./browser.ts";
+import { escape, items, navigation, pick } from "./helpers.ts";
 import { log } from "./paths.ts";
 import { siteKey, validateFunction, type FunctionContext, type SiteFunction, type Sites } from "./sites.ts";
 
-export type RunOptions = { timeoutMs?: number; record?: boolean };
+export type RunOptions = {
+  timeoutMs?: number;
+  record?: boolean;
+  // Reload the page before running, clearing leftover dialogs and half-filled forms.
+  reset?: boolean;
+  // Default timeout for each Playwright action or wait in this run, to fail fast.
+  actionTimeoutMs?: number;
+  // Aborts the run, e.g. when the MCP client cancels the request.
+  signal?: AbortSignal;
+  // Receives each ctx.log message while the run is going.
+  onProgress?: (message: string) => void;
+};
 export type RunResult = {
   ok: boolean;
   ms: number;
   result?: unknown;
   error?: string;
   at?: string;
+  aborted?: boolean;
   state?: PageState;
   snapshot?: string;
   screenshot?: string;
   dependents?: string[];
   video?: string;
 };
+export type RunStatus = { site: string; name: string; elapsed_ms: number; url: string; log: string[] };
+
+type Current = { site: string; name: string; start: number; page: Page; log: string[]; abort: AbortController };
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-");
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+// Rejects when the signal aborts, so a run can stop waiting for a function that does not return.
+function untilAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    const fail = () => reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 // Point at the line inside the site's own code, not Playwright internals.
@@ -51,14 +67,44 @@ function compact(value: unknown): unknown {
   return text.length > 100_000 ? text.slice(0, 100_000) + "… truncated" : value;
 }
 
+// An open dialog is usually what a failed step was working in, so it leads the failure snapshot
+// and is never cut off by a long page.
+async function failureSnapshot(page: Page): Promise<string> {
+  const parts: string[] = [];
+  const dialogs = page.locator('[role="dialog"]:visible, [aria-modal="true"]:visible, dialog[open]');
+  const count = Math.min(await dialogs.count().catch(() => 0), 3);
+  for (let i = 0; i < count; i++) {
+    const tree = await dialogs.nth(i).ariaSnapshot({ mode: "ai", timeout: 5_000 }).catch(() => "");
+    if (tree) parts.push(tree.length > 6_000 ? tree.slice(0, 6_000) + "\n… truncated" : tree);
+  }
+  const pageTree = await snapshot(page, { maxChars: 6_000 }).catch(() => "");
+  if (!parts.length) return pageTree;
+  return `open dialogs:\n${parts.join("\n")}\n\npage:\n${pageTree}`;
+}
+
 export class Runner {
   private sites: Sites;
   private browser: BrowserManager;
   private dataDir: string;
+  private current: Current | null = null;
   constructor(sites: Sites, browser: BrowserManager, dataDir: string) {
     this.sites = sites;
     this.browser = browser;
     this.dataDir = dataDir;
+  }
+
+  // What is running now, for fn_status.
+  status(): RunStatus | null {
+    const c = this.current;
+    if (!c) return null;
+    return { site: c.site, name: c.name, elapsed_ms: Date.now() - c.start, url: c.page.isClosed() ? "" : c.page.url(), log: c.log.slice(-20) };
+  }
+
+  // Stops the running function, for fn_abort. Returns what was stopped.
+  abort(reason = "aborted by fn_abort"): RunStatus | null {
+    const status = this.status();
+    this.current?.abort.abort(new Error(reason));
+    return status;
   }
 
   private async execute(site: string, label: string, fn: SiteFunction, args: Record<string, unknown>, opts: RunOptions): Promise<RunResult> {
@@ -68,13 +114,25 @@ export class Runner {
     const roots = [this.sites.dir(key), join(this.dataDir, "tmp")].flatMap(p => [p, pathToFileURL(p).href]);
     return this.browser.use(async (page: Page) => {
       const start = Date.now();
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+      const cancelled = () => abort.abort(new Error("cancelled by the client"));
+      opts.signal?.addEventListener("abort", cancelled, { once: true });
+      const current: Current = { site: key, name: label, start, page, log: [], abort };
+      this.current = current;
       const sites = this.sites;
       const ui = await sites.loadUi(key);
       const stack: string[] = [label];
       const nav = navigation(page, key);
       const context = (a: Record<string, unknown>): FunctionContext => ({
-        page, args: a, ui, site: key, call, items, escape, ...nav,
-        log: (...parts) => log(`${key}/${stack.at(-1)}:`, ...parts),
+        page, args: a, ui, site: key, call, items, escape, pick, ...nav,
+        log: (...parts) => {
+          const message = `${stack.at(-1)}: ${parts.map(String).join(" ")}`;
+          log(`${key}/${message}`);
+          current.log.push(message);
+          if (current.log.length > 200) current.log.shift();
+          opts.onProgress?.(message);
+        },
       });
       async function call(name: string, a: Record<string, unknown> = {}): Promise<unknown> {
         if (stack.includes(name) || stack.length >= 8) throw new Error(`call loop: ${[...stack, name].join(" → ")}`);
@@ -87,33 +145,58 @@ export class Runner {
       }
       let video: string | undefined;
       let stopActions: (() => Promise<void>) | undefined;
-      if (opts.record) {
-        await mkdir(join(this.dataDir, "videos"), { recursive: true });
-        video = join(this.dataDir, "videos", `${key}-${label}-${stamp()}.webm`);
-        await page.screencast.start({ path: video });
-        const shown = await page.screencast.showActions({ cursor: "pointer" });
-        stopActions = () => shown.dispose();
-      }
+      if (opts.actionTimeoutMs) page.setDefaultTimeout(opts.actionTimeoutMs);
       try {
-        const result = await withTimeout(fn.run(context(args)), timeoutMs);
+        if (opts.reset && page.url() !== "about:blank") {
+          await page.reload();
+          await settle(page);
+        }
+        if (opts.record) {
+          await mkdir(join(this.dataDir, "videos"), { recursive: true });
+          video = join(this.dataDir, "videos", `${key}-${label}-${stamp()}.webm`);
+          await page.screencast.start({ path: video });
+          const shown = await page.screencast.showActions({ cursor: "pointer" });
+          stopActions = () => shown.dispose();
+        }
+        // After an abort the function keeps running until its page calls fail; whichever promise
+        // loses the race must not become an unhandled rejection.
+        const running = fn.run(context(args));
+        const stopped = untilAborted(abort.signal);
+        running.catch(() => {});
+        stopped.catch(() => {});
+        const result = await Promise.race([running, stopped]);
         return { ok: true, ms: Date.now() - start, result: compact(result), state: await pageState(page), video };
       } catch (error) {
+        const aborted = abort.signal.aborted;
         const failed: RunResult = {
           ok: false,
           ms: Date.now() - start,
           error: String((error as Error)?.message ?? error).replace(/\u001b\[[0-9;]*m/g, "").split("\n").slice(0, 6).join("\n"),
           at: locate(error, roots),
+          ...(aborted ? { aborted: true } : {}),
           video,
         };
         failed.state = await pageState(page).catch(() => undefined);
-        failed.snapshot = await snapshot(page, { maxChars: 6_000 }).catch(() => undefined);
+        failed.snapshot = await failureSnapshot(page);
         await mkdir(join(this.dataDir, "screenshots"), { recursive: true });
         const shot = join(this.dataDir, "screenshots", `${key}-${label}-${stamp()}.png`);
         failed.screenshot = await page.screenshot({ path: shot }).then(() => shot, () => undefined);
+        if (aborted) {
+          // The function may still be running; closing its tab makes its pending and later
+          // Playwright calls fail, so it cannot keep driving the browser or holding the lock.
+          await stopActions?.().catch(() => {});
+          if (opts.record) await page.screencast.stop().catch(() => {});
+          await this.browser.discardTab();
+          failed.error += "\nstopped the function by closing its tab; the next call opens a new one";
+        }
         return failed;
       } finally {
+        clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", cancelled);
+        if (this.current === current) this.current = null;
+        if (opts.actionTimeoutMs && !page.isClosed()) page.setDefaultTimeout(defaultActionTimeout);
         await stopActions?.().catch(() => {});
-        if (opts.record) await page.screencast.stop().catch(() => {});
+        if (opts.record && !page.isClosed()) await page.screencast.stop().catch(() => {});
       }
     }, timeoutMs + 30_000);
   }

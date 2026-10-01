@@ -49,14 +49,40 @@ export function navigation(page: Page, site: string) {
   const origin = siteOrigin(site);
   return {
     origin,
-    // Go to a path on this site unless already exactly there.
+    // Go to a page of this site unless already exactly there. Use this when the function
+    // needs to start on a specific page.
     open: async (path = "/") => {
       const target = new URL(path, origin).href;
       if (page.url() !== target) await page.goto(target);
     },
-    // Go to a path only when the tab is on another site (or blank); otherwise stay.
+    // Only checks the origin: goes to the path when the tab is on another site (or blank) and
+    // otherwise stays on whatever page of this site it is on. Use it for steps that work from
+    // any page, such as clicking a link in a global nav.
     ensureOnSite: async (path = "/") => {
       if (!page.url().startsWith(origin + "/")) await page.goto(new URL(path, origin).href);
     },
   };
+}
+
+// Picks options in an ARIA listbox dropdown opened by `trigger`. Such listboxes are often rendered
+// outside the dialog holding the trigger and may stay open after a pick, where Escape would close
+// the dialog as well; so the dropdown is closed by toggling its trigger. The trigger's name usually
+// changes to the selection, so it is held as an element rather than re-resolved by name.
+export async function pick(trigger: Locator, options: string | RegExp | (string | RegExp)[]): Promise<void> {
+  const page = trigger.page();
+  const button = await trigger.elementHandle();
+  if (!button) throw new Error(`pick: trigger not found: ${trigger}`);
+  await button.click();
+  const controls = await button.getAttribute("aria-controls");
+  const listbox = controls ? page.locator(`[id="${controls}"]`) : page.getByRole("listbox").filter({ visible: true }).last();
+  await listbox.waitFor();
+  for (const option of [options].flat()) {
+    await listbox.getByRole("option", { name: option, exact: typeof option === "string" }).first().click();
+  }
+  if (await listbox.isVisible()) {
+    if ((await button.getAttribute("aria-expanded").catch(() => null)) === "true") await button.click();
+    else await page.locator('[aria-haspopup][aria-expanded="true"]').first().click();
+  }
+  await listbox.waitFor({ state: "hidden" });
+  await button.dispose();
 }

@@ -14,7 +14,8 @@ const usage = `webnav-mcp [options]
 MCP server (stdio) for exploring websites and building reusable Playwright functions.
 Attaches to a browser you already run with remote debugging enabled; never starts one unless --launch-user-data-dir is given.
 
-  --cdp-endpoint <url>          local http:// or ws:// CDP endpoint (default: discover DevToolsActivePort)
+  --cdp-endpoint <url>          local http:// or ws:// CDP endpoint (default: $WEBNAV_CDP_ENDPOINT, else
+                                discover DevToolsActivePort, else port 9222)
   --user-data-dir <dir>         browser user data dir to attach to (e.g. ~/.config/chromium)
   --profile-directory <name>    profile inside it, e.g. "Profile 1" (default: pi-browser-harness pin)
   --browser-executable <path>   browser binary used to open a window in that profile
@@ -62,7 +63,7 @@ await mkdir(dataDir, { recursive: true, mode: 0o700 });
 
 const launchDir = values["launch-user-data-dir"];
 const browser = new BrowserManager({
-  cdpEndpoint: values["cdp-endpoint"],
+  cdpEndpoint: values["cdp-endpoint"] ?? (process.env.WEBNAV_CDP_ENDPOINT || undefined),
   userDataDir: values["user-data-dir"],
   profileDirectory: values["profile-directory"],
   executable: values["browser-executable"],
