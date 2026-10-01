@@ -171,9 +171,55 @@ export async function settle(page: Page): Promise<void> {
   await page.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => {});
 }
 
-export async function snapshot(page: Page, maxChars = 15_000): Promise<string> {
-  const tree = await page.ariaSnapshot({ mode: "ai", timeout: 10_000 });
-  return tree.length > maxChars ? tree.slice(0, maxChars) + `\n… truncated (${tree.length} chars)` : tree;
+const truncate = (text: string, maxChars: number) =>
+  text.length > maxChars ? text.slice(0, maxChars) + `\n… truncated (${text.length} chars)` : text;
+
+// Last full-page snapshot per tab, so actions can report only what changed.
+const lastSnapshot = new WeakMap<Page, string>();
+
+export type SnapshotOptions = { maxChars?: number; within?: string; depth?: number };
+
+export async function snapshot(page: Page, opts: SnapshotOptions = {}): Promise<string> {
+  const target = opts.within ? page.locator(opts.within).first() : page;
+  const tree = await target.ariaSnapshot({ mode: "ai", depth: opts.depth, timeout: 10_000 });
+  if (!opts.within && !opts.depth) lastSnapshot.set(page, tree);
+  return truncate(tree, opts.maxChars ?? 15_000);
+}
+
+const indent = (line: string) => line.length - line.trimStart().length;
+
+// Lines added since the last snapshot, with their ancestor lines for context. Refs are stable
+// between snapshots, so unchanged elements produce identical lines.
+export async function snapshotChanges(page: Page, maxChars = 15_000): Promise<string> {
+  const before = lastSnapshot.get(page);
+  const full = await snapshot(page, { maxChars });
+  const after = lastSnapshot.get(page) ?? "";
+  if (!before) return full;
+  const pool = new Map<string, number>();
+  for (const line of before.split("\n")) pool.set(line, (pool.get(line) ?? 0) + 1);
+  const lines = after.split("\n");
+  const added = new Set<number>();
+  lines.forEach((line, i) => {
+    const n = pool.get(line) ?? 0;
+    if (n > 0) pool.set(line, n - 1);
+    else added.add(i);
+  });
+  const removed = [...pool].flatMap(([line, n]) => Array(n).fill(line.trim()));
+  if (added.size === 0 && removed.length === 0) return "no changes in the accessibility tree";
+  const keep = new Set(added);
+  for (const i of added) {
+    let level = indent(lines[i]);
+    for (let j = i - 1; j >= 0 && level > 0; j--) {
+      if (indent(lines[j]) < level) {
+        keep.add(j);
+        level = indent(lines[j]);
+      }
+    }
+  }
+  const shown = [...keep].sort((a, b) => a - b).map(i => (added.has(i) ? "+ " : "  ") + lines[i]);
+  if (shown.length > lines.length * 0.6) return full;
+  const gone = removed.length ? `\nremoved ${removed.length} lines, e.g.:\n${removed.slice(0, 10).join("\n")}` : "";
+  return truncate(`changes since last snapshot (+ added, others are context):\n${shown.join("\n")}${gone}`, maxChars);
 }
 
 export async function act(page: Page, input: ActInput): Promise<void> {

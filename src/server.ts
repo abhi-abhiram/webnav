@@ -3,7 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { act, actions, pageState, settle, snapshot, type BrowserManager } from "./browser.ts";
+import { act, actions, pageState, settle, snapshot, snapshotChanges, type BrowserManager } from "./browser.ts";
 import type { Runner } from "./runner.ts";
 import { siteKey, type Sites } from "./sites.ts";
 
@@ -56,10 +56,15 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
     })));
 
     server.registerTool("browser_snapshot", {
-      description: "Accessibility tree of the current page with [ref=…] handles for browser_act. Refs are only valid until the page changes.",
-      inputSchema: { max_chars: z.number().int().min(1000).max(100_000).optional() },
+      description: "Accessibility tree of the current page with [ref=…] handles for browser_act. Use within/depth to read one part of a large page. Refs stay valid until that element changes.",
+      inputSchema: {
+        within: z.string().optional().describe('Playwright selector to snapshot only that part, e.g. role=navigation[name="Main"]'),
+        depth: z.number().int().min(1).max(50).optional().describe("Limit tree depth"),
+        max_chars: z.number().int().min(1000).max(100_000).optional(),
+      },
       annotations: read,
-    }, safe(async a => browser.use(async page => text(await pageState(page), await snapshot(page, a.max_chars)))));
+    }, safe(async a => browser.use(async page =>
+      text(await pageState(page), await snapshot(page, { within: a.within, depth: a.depth, maxChars: a.max_chars })))));
 
     server.registerTool("browser_act", {
       description: "Perform one interaction on the current page, by snapshot ref or Playwright selector, then return the new state and snapshot. press without a target sends the key to the page; scroll without a target scrolls by value pixels.",
@@ -70,13 +75,16 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
         value: z.string().optional().describe("Text for fill/type, key for press (e.g. Enter), option for select, pixels for scroll"),
         values: z.array(z.string()).optional().describe("Several options for select"),
         files: z.array(z.string()).optional().describe("Absolute file paths for upload"),
-        snapshot: z.boolean().optional().describe("Include the snapshot afterwards (default true)"),
+        snapshot: z.enum(["changes", "full", "none"]).optional()
+          .describe("What to return afterwards: changes since the last snapshot (default), the full tree, or nothing"),
       },
       annotations: live,
     }, safe(async a => browser.use(async page => {
       await act(page, a);
       await settle(page);
-      return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
+      const mode = a.snapshot ?? "changes";
+      const tree = mode === "none" ? "" : mode === "full" ? await snapshot(page) : await snapshotChanges(page);
+      return text(await pageState(page), tree);
     })));
 
     server.registerTool("browser_screenshot", {

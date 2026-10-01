@@ -103,7 +103,7 @@ export class Runner {
           video,
         };
         failed.state = await pageState(page).catch(() => undefined);
-        failed.snapshot = await snapshot(page, 6_000).catch(() => undefined);
+        failed.snapshot = await snapshot(page, { maxChars: 6_000 }).catch(() => undefined);
         await mkdir(join(this.dataDir, "screenshots"), { recursive: true });
         const shot = join(this.dataDir, "screenshots", `${key}-${label}-${stamp()}.png`);
         failed.screenshot = await page.screenshot({ path: shot }).then(() => shot, () => undefined);
