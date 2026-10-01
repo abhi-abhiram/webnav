@@ -108,7 +108,16 @@ async function resolveEndpoint(opts: BrowserOptions): Promise<Endpoint> {
   if (found.length > 1) {
     throw new Error(`several browsers allow remote debugging; choose one with --user-data-dir: ${found.map(f => f.dir).join(", ")}`);
   }
-  throw new Error(`no running browser found; open your usual browser and ${enable}`);
+  // A browser started with --remote-debugging-port and a custom --user-data-dir leaves no file
+  // where we look, but usually listens on the conventional port.
+  const conventional = await liveEndpoint(9222);
+  if (conventional) {
+    log("no known profile has remote debugging; using the browser on port 9222");
+    return { endpoint: validateEndpoint(conventional) };
+  }
+  throw new Error(`no running browser found; open your usual browser and ${enable}. ` +
+    "To attach to a specific browser, pass --cdp-endpoint (or set WEBNAV_CDP_ENDPOINT), " +
+    "or --user-data-dir for a browser whose profile is not in a standard location.");
 }
 
 // Reuse the profile pinned with pi-browser-harness (/browser-profile) when it is the same browser.
