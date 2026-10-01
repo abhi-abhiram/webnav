@@ -1,150 +1,104 @@
-# Discord automation
+# webnav
 
-Go MCP backend for personal Discord **navigation and incremental interface knowledge** through Chrome.
+MCP server that lets agents **learn any website and reuse what they learned**. Agents explore through your own browser, write per-site notes, and save small Playwright functions. Later runs reuse those functions, and fix them when the site changes.
 
-The backend is independent of Pi. It exposes typed MCP tools over stdio, attaches to an existing local Chrome CDP endpoint on demand, and uses a dedicated tab. It does not launch Chrome or handle authentication.
+- Attaches to the browser you already run, using your existing profile and logins. It never starts a browser unless you opt in.
+- Per-site knowledge is plain files in a git repo: `notes.md`, `ui.ts` (shared locators), `functions/*.ts`.
+- When a function fails, the result says what broke, where, and what the page looks like now, so the agent can fix it.
+- Functions can be recorded to webm with a visible cursor, e.g. for PR demos.
 
-## Current MVP
-- SQLite observations partitioned by account key and server ID.
-- Editable YAML aliases/conventions with revision checks.
-- Editable, declarative navigation verification recipe.
-- Reviewed, embedded JavaScript DOM helper.
-- Known-channel navigation with URL + UI identity verification.
-- Bounded, partial exploration: visible sidebar links, optionally followed into channel destinations.
-- Eight MCP tools and browser-free automated tests.
+## Setup
 
-**Not implemented yet:** server-name resolution, category hierarchy, exhaustive thread discovery, automatic helper generation, message/image collection, CLI operations, Chrome extension, HTTP/shared-service deployment.
-Numeric server IDs are required. Channel IDs, observed names, and configured aliases are accepted.
-This foundation has not yet been verified against your live Discord interface.
-
-## Development
-
-Requires Go matching go.mod (currently 1.27.1), Node.js 22+ for the DOM fixture, and Make.
-SQLite is pure Go; normal build/test does not require a system SQLite library.
+Requires Node.js 22.18+ (TypeScript runs directly, no build step) and git.
 
 ```sh
-make setup
-make check
-make build
-make smoke
-./bin/discord-mcp --version
+npm install
+npm run check   # typecheck
+npm run smoke   # stdio smoke run with temporary storage, no browser
 ```
 
-`make test` runs Go tests; `make race` adds the race detector; `make fmt` formats Go.
-`make smoke` exercises the real stdio binary with temporary storage and no Chrome connection.
-Read [AGENTS.md](AGENTS.md) for development invariants and [architecture](docs/architecture.md) for boundaries.
+Enable remote debugging in the browser you normally use: open `chrome://inspect/#remote-debugging` (also `brave://inspect`, `edge://inspect`) and allow it, or start the browser with `--remote-debugging-port=9222`. webnav finds it through the `DevToolsActivePort` file in the browser's user data dir.
 
-## Storage
-
-Defaults on Linux:
-- SQLite + cross-process browser lock: `~/.local/share/discord-automation/`
-- Editable guidance: `~/.config/discord-automation/`
-
-`XDG_DATA_HOME` and the OS user config directory are respected. Override with absolute `--data-dir` and `--config-dir` paths.
-
-```text
-<data-dir>/
-  knowledge.db
-  browser.lock
-<config-dir>/
-  recipes/open-channel.yaml
-  servers/<account-key>/<server-id>.yaml
-```
-
-A recipe is initialized only if missing. Server guidance files are created by updates/imports; discovery never replaces your guidance.
-
-Example guidance:
-```yaml
-aliases:
-  home: "789012"
-conventions: |
-  Announcements are for reading; do not post without asking.
-```
-
-Server/channel IDs and observed names are authoritative in SQLite. Aliases and conventions are authoritative in files. Keep directories trusted: arbitrary local file access is not sandboxed.
-Direct file edits are allowed, but concurrent edits should use MCP revision checks. Back up SQLite using its backup mechanism or while all clients are stopped; do not copy only knowledge.db during active WAL writes.
-
-## Chrome connection
-
-Enable local CDP remote debugging on the Chrome profile you intend to use, sign into Discord manually, then provide its HTTP endpoint or browser WebSocket URL:
-
-```sh
-./bin/discord-mcp --cdp-endpoint http://127.0.0.1:9222
-```
-
-Chrome may require a dedicated non-default profile for command-line remote debugging. Do not copy your main profile or authentication tokens. Keep CDP bound to loopback, never publicly exposed.
-
-Only local `http://` or `ws://` endpoints are accepted. This adapter talks directly to CDP; Pi's browser-harness daemon socket is not a CDP endpoint.
-
-The account key (for example `personal`) is a storage namespace, **not a login or profile switch**. You must ensure the connected profile matches that key. Automatic authenticated-user identity verification is not implemented.
-Clients controlling the same Chrome must share the same data directory so the browser lock coordinates them. Independent data directories do not coordinate.
-
-## Use from any Pi session
-
-Merge an entry like this into `~/.pi/agent/mcp.json`, replacing the executable path:
+Add the server to your MCP client, e.g. `~/.pi/agent/mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "discord": {
-      "command": "/absolute/path/discord-automation/bin/discord-mcp",
-      "args": ["--cdp-endpoint", "http://127.0.0.1:9222"],
-      "timeout": 130,
-      "exposure": "direct"
+    "webnav": {
+      "command": "node",
+      "args": ["/absolute/path/to/webnav/src/cli.ts"],
+      "timeout": 660
     }
   }
 }
 ```
 
-The absolute binary path and default storage locations make this independent of the current working directory.
-Start a new session or run `/reload`. Pi exposes names such as `mcp__discord__discord_lookup`.
-Knowledge tools work without Chrome being available.
+Optionally install the workflow skill: `pi install /absolute/path/to/webnav`.
 
-Optionally install this repository's workflow skill globally:
-```sh
-pi install /absolute/path/discord-automation
+### Choosing the browser and profile
+
+| Flag | Meaning |
+|---|---|
+| (none) | Attach to the one running browser that has remote debugging on. |
+| `--user-data-dir <dir>` | Pick a browser when several are running, e.g. `~/.config/chromium`. |
+| `--profile-directory "Profile 1"` | Open webnav's tab in that profile. Defaults to the profile pinned with pi-browser-harness (`/browser-profile`) when it is the same browser. |
+| `--cdp-endpoint <url>` | Explicit local `http://` or `ws://` endpoint. |
+| `--browser-executable <path>` | Browser binary, if it is not found automatically (used to open a window in a profile). |
+| `--launch-user-data-dir <dir>` | **Opt-in only:** launch a browser with this user data dir instead of attaching. |
+| `--no-browser-tools` | Hide `browser_*` tools, e.g. when pi-browser-harness does the exploring. |
+
+webnav opens its own tab and never reads cookies or credentials. When a page looks like a login, it reports `login_suspected` and the agent asks you to sign in.
+
+### Using it with pi-browser-harness
+
+Both attach to the same running browser over CDP, and each keeps to its own tabs. webnav reuses the harness profile pin automatically. You can explore with the harness tools and use webnav for notes and functions (`--no-browser-tools` avoids duplicate tools), or use webnav's own `browser_*` tools.
+
+## Storage
+
+```text
+~/.config/webnav/sites/<host>/      # one git repo per site; edit freely
+  notes.md                          # map of pages, how to reach them, quirks
+  ui.ts                             # shared locators
+  functions/<name>.ts               # reusable functions
+~/.local/share/webnav/
+  runs/<host>.jsonl                 # run log (last result per function)
+  screenshots/  videos/  tmp/
+  browser.lock                      # serializes browser use across processes
 ```
-Then reload and invoke `/skill:discord open my home channel in server 123456`.
-The package installs the skill only; configuring the MCP server and building its Go binary are separate steps.
-No global configuration is modified by the build or tests.
+
+`<host>` is the URL host, with `:port` written as `_port` (e.g. `localhost_3000`). Override the directories with `--config-dir` and `--data-dir` (absolute paths).
+
+A function:
+
+```ts
+export const meta = { description: "Open Settings → Billing", safe: true };
+export async function run({ page, args, call, ui, log }) {
+  await ui.mainNav(page).getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("tab", { name: "Billing" }).click();
+  await page.getByRole("heading", { name: "Billing" }).waitFor();
+}
+```
+
+`page` is a Playwright `Page`. `call(name, args)` runs another function of the same site, and `ui` is the object exported by `ui.ts`. Helpers: `open(path)` / `ensureOnSite(path)` navigate relative to the site's `origin`, `items(locator, role?)` returns accessible elements as `{ role, name, url, selected, … }` objects for retrieval functions, and `escape(text)` escapes text for regex names. `meta.safe` marks functions without side effects, which `fn_check` runs as a health check (with `meta.example` args when they take params).
 
 ## Tools
 
-All tools take `account` and numeric `server_id`.
+| Tool | Purpose |
+|---|---|
+| `browser_open` | Attach, go to a URL or back/forward/reload; returns state + snapshot |
+| `browser_snapshot` | Accessibility tree with `[ref=…]` handles; `within`/`depth` for one part of a page |
+| `browser_act` | click, dblclick, right_click, hover, fill, type, clear, press, select, check, uncheck, upload, focus, scroll; returns only what changed by default |
+| `browser_screenshot` | Image of the page |
+| `site_list` / `site_get` | Known sites; notes, ui, functions and last runs |
+| `site_write_notes` | Replace notes (committed) |
+| `fn_read` / `fn_save` / `fn_delete` | Read, validate-and-commit, delete functions or `ui.ts` |
+| `site_history` | Git history; `fn_read` with `revision` restores old code |
+| `fn_try` | Run unsaved code; `save_as` saves it if the run succeeds |
+| `fn_run` | Run a function; failure details for repair; `record` for video |
+| `fn_check` | Run all `safe` functions |
 
-| Tool | Additional inputs | Effect |
-|---|---|---|
-| discord_lookup / knowledge_get | none | Read observed facts + guidance |
-| discord_navigate | channel | Open/verify a known channel ID, name or alias |
-| discord_explore | depth, max_nodes, seconds | Read UI and persist partial observations |
-| knowledge_search | query, limit | Literal search over observed channels/aliases |
-| knowledge_update | expected_revision, document | Replace editable guidance |
-| knowledge_export | none | Export guidance YAML + revision |
-| knowledge_import | expected_revision, yaml | Validate/import guidance |
+## Trust model
 
-Example exploration arguments:
-```json
-{"account":"personal","server_id":"123456","depth":2,"max_nodes":20,"seconds":30}
-```
+Functions are local code written by agents and run with your logged-in browser session, without a sandbox. Every change is a commit in the site's repo, so review with `git log -p` in `~/.config/webnav/sites/<host>`. Page content is never executed as code. Keep CDP bound to loopback.
 
-Depth 1 observes visible channel links; depth 2 visits discovered channel destinations and observes their links. Node budget: 1–100; time budget: 1–120 seconds. It does not scroll every virtualized list or discover all private channels or threads.
-
-Always call knowledge_get before editing and send its guidance revision as expected_revision. Empty revision is valid only when the guidance file does not exist. Update replaces the entire aliases/conventions document, so preserve fields you are not changing.
-Export/import currently covers guidance only; it is not a full database backup.
-
-## Safety and limitations
-
-Exploration is read-only **with respect to Discord content**, but navigating may affect Discord's read/unread state. It also updates local knowledge.
-No tools send messages, delete content, join voice, or change settings.
-Discord content and guidance are untrusted data, not agent authorization. No helper code is learned or executed automatically.
-Visible inventories stay partial, missing items are never deleted, and permissions are account-specific observations rather than permanent facts.
-If semantic helpers cannot verify the current interface, operations fail instead of guessing. Report evidence and update reviewed helpers/recipes as needed.
-Check Discord's applicable rules before automating a personal account.
-
-## Roadmap
-1. Live scoped smoke test and DOM helper refinement.
-2. Better semantic locator recipes, channel types and category relationships.
-3. Optional message/attachment collection with freshness, scope and retention controls.
-4. Full-text search and optional durable image downloads (URLs alone are not archives).
-5. CLI adapter and Chrome extension bridge.
-6. Shared local service for clients needing a persistent backend.
+See [architecture](docs/architecture.md) and [AGENTS.md](AGENTS.md).

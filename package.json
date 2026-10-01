@@ -1,8 +1,19 @@
 {
-  "name": "discord-automation-skill",
+  "name": "webnav",
   "version": "0.1.0",
   "private": true,
-  "description": "Local Pi workflow skill for the Go Discord MCP backend",
+  "description": "MCP server that lets agents explore websites, keep notes and build reusable Playwright functions",
+  "type": "module",
+  "bin": {
+    "webnav-mcp": "./src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "tsc -p .",
+    "smoke": "node scripts/smoke.ts"
+  },
   "keywords": [
     "pi-package"
   ],
@@ -10,5 +21,14 @@
     "skills": [
       "./skills"
     ]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "playwright-core": "^1.63.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2"
   }
 }
