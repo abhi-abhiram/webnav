@@ -62,7 +62,8 @@ export class Runner {
   private async execute(site: string, label: string, fn: SiteFunction, args: Record<string, unknown>, opts: RunOptions): Promise<RunResult> {
     const key = siteKey(site);
     const timeoutMs = opts.timeoutMs ?? 60_000;
-    const roots = [pathToFileURL(this.sites.dir(key)).href, pathToFileURL(join(this.dataDir, "tmp")).href];
+    // Stacks show plain paths (Playwright) or file URLs (Node), so match both.
+    const roots = [this.sites.dir(key), join(this.dataDir, "tmp")].flatMap(p => [p, pathToFileURL(p).href]);
     return this.browser.use(async (page: Page) => {
       const start = Date.now();
       const sites = this.sites;
@@ -97,7 +98,7 @@ export class Runner {
         const failed: RunResult = {
           ok: false,
           ms: Date.now() - start,
-          error: String((error as Error)?.message ?? error).split("\n").slice(0, 6).join("\n"),
+          error: String((error as Error)?.message ?? error).replace(/\u001b\[[0-9;]*m/g, "").split("\n").slice(0, 6).join("\n"),
           at: locate(error, roots),
           video,
         };
