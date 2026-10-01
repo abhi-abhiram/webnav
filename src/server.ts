@@ -147,10 +147,19 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
   }, safe(async a => text(await sites.history(siteKey(a.site), a.name, a.limit) || "no history")));
 
   server.registerTool("fn_try", {
-    description: "Run unsaved function code in the browser tab to test it before fn_save. Same module shape and ctx as saved functions; ctx.call can use saved functions.",
-    inputSchema: { site, code: z.string(), args, timeout_ms: z.number().int().min(1000).max(600_000).optional() },
+    description: "Run unsaved function code in the browser tab. Same module shape and ctx as saved functions. With save_as, the code is saved (like fn_save) only if the run succeeds.",
+    inputSchema: {
+      site, code: z.string(), args,
+      timeout_ms: z.number().int().min(1000).max(600_000).optional(),
+      save_as: z.string().optional().describe("Function name to save under when the run succeeds"),
+      message: z.string().optional().describe("Commit message used with save_as"),
+    },
     annotations: live,
-  }, safe(async a => text(await runner.try(a.site, a.code, a.args, { timeoutMs: a.timeout_ms }))));
+  }, safe(async a => {
+    const result = await runner.try(a.site, a.code, a.args, { timeoutMs: a.timeout_ms });
+    if (!result.ok || !a.save_as) return text(result);
+    return text({ ...result, saved: await sites.save(a.site, a.save_as, a.code, a.message) });
+  }));
 
   server.registerTool("fn_run", {
     description: "Run a saved function in the browser tab. On failure returns the error, the failing line, page state, a snapshot, a screenshot path and dependent functions, so the function can be fixed. record=true saves a webm with a visible cursor.",
