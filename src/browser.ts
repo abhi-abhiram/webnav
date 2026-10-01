@@ -23,6 +23,9 @@ export type BrowserOptions = {
 
 export type PageState = { url: string; title: string; login_suspected: boolean };
 
+// How long a single Playwright action or wait may take by default.
+export const defaultActionTimeout = 10_000;
+
 export const actions = [
   "click", "dblclick", "right_click", "hover", "fill", "type", "clear", "press",
   "select", "check", "uncheck", "upload", "focus", "scroll",
@@ -358,7 +361,7 @@ export class BrowserManager {
     } else {
       this.tab = await context.newPage();
     }
-    this.tab.setDefaultTimeout(10_000);
+    this.tab.setDefaultTimeout(defaultActionTimeout);
     return this.tab;
   }
 
@@ -372,6 +375,21 @@ export class BrowserManager {
       }
       return fn(await this.page());
     });
+  }
+
+  // Stops a runaway function from inside use(): its pending Playwright calls fail once the
+  // page is closed, and later ones fail at once. The next call gets a fresh tab.
+  async discardTab(): Promise<void> {
+    const tab = this.tab;
+    if (!tab || tab.isClosed()) return;
+    this.tab = null;
+    const others = this.context?.pages().filter(p => p !== tab && !p.isClosed()) ?? [];
+    // Closing the last window would quit Chromium, so keep a blank tab as ours in that case.
+    if (others.length === 0 && this.context) {
+      this.tab = await this.context.newPage();
+      this.tab.setDefaultTimeout(defaultActionTimeout);
+    }
+    await tab.close().catch(() => {});
   }
 
   // Switch this session to another browser. The previous browser keeps running; only our
