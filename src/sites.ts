@@ -5,11 +5,18 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { Page } from "playwright-core";
+import type { Locator, Page } from "playwright-core";
+import type { Item } from "./helpers.ts";
 
 const exec = promisify(execFile);
 
-export type FunctionMeta = { description: string; params?: Record<string, string>; safe?: boolean };
+// safe: no side effects, so fn_check may run it (with example args when it has params).
+export type FunctionMeta = {
+  description: string;
+  params?: Record<string, string>;
+  safe?: boolean;
+  example?: Record<string, unknown>;
+};
 export type FunctionContext = {
   page: Page;
   args: Record<string, unknown>;
@@ -17,6 +24,11 @@ export type FunctionContext = {
   ui: Record<string, any>;
   site: string;
   log: (...parts: unknown[]) => void;
+  origin: string;
+  open: (path?: string) => Promise<void>;
+  ensureOnSite: (path?: string) => Promise<void>;
+  items: (scope: Locator, role?: string | RegExp, opts?: { depth?: number }) => Promise<Item[]>;
+  escape: (text: string) => string;
 };
 export type SiteFunction = { meta: FunctionMeta; run: (ctx: FunctionContext) => Promise<unknown> };
 export type RunRecord = { t: string; name: string; ok: boolean; ms: number; error?: string; url?: string };
@@ -56,7 +68,8 @@ const notesTemplate = (site: string) => `# ${site}
 ## Quirks
 `;
 
-const uiTemplate = `import type { Page } from "playwright-core";
+const uiTemplate = `import type { Locator, Page } from "playwright-core";
+import type { Item } from "./helpers.ts";
 
 // Shared locators for this site. When the UI changes, fix them here once.
 export const ui = {
@@ -170,7 +183,7 @@ export class Sites {
       throw new Error(`not saved: ${(error as Error).message}`);
     }
     const warnings: string[] = [];
-    if (name !== "ui" && !/waitFor|expect\(|toBeVisible|toHaveURL/.test(code)) {
+    if (name !== "ui" && !/waitFor|expect\(|toBeVisible|toHaveURL|items\(/.test(code)) {
       warnings.push("no final wait found: end with a wait that proves the result (e.g. a heading or row .waitFor())");
     }
     const verb = previous === null ? "add" : "update";

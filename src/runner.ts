@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
 import { pageState, snapshot, type BrowserManager, type PageState } from "./browser.ts";
+import { escape, items, navigation } from "./helpers.ts";
 import { log } from "./paths.ts";
 import { siteKey, validateFunction, type FunctionContext, type SiteFunction, type Sites } from "./sites.ts";
 
@@ -69,8 +70,9 @@ export class Runner {
       const sites = this.sites;
       const ui = await sites.loadUi(key);
       const stack: string[] = [label];
+      const nav = navigation(page, key);
       const context = (a: Record<string, unknown>): FunctionContext => ({
-        page, args: a, ui, site: key, call,
+        page, args: a, ui, site: key, call, items, escape, ...nav,
         log: (...parts) => log(`${key}/${stack.at(-1)}:`, ...parts),
       });
       async function call(name: string, a: Record<string, unknown> = {}): Promise<unknown> {
@@ -140,9 +142,9 @@ export class Runner {
     }
   }
 
-  // Health check: runs every function marked meta.safe, without arguments.
-  async check(site: string): Promise<{ name: string; ok: boolean; ms: number; error?: string; at?: string }[]> {
-    const out = [];
+  // Health check: runs every function marked meta.safe, with meta.example as arguments.
+  async check(site: string): Promise<{ name: string; ok: boolean; ms: number; error?: string; at?: string; skipped?: string }[]> {
+    const out: { name: string; ok: boolean; ms: number; error?: string; at?: string; skipped?: string }[] = [];
     for (const name of await this.sites.names(site)) {
       let fn: SiteFunction;
       try {
@@ -152,7 +154,11 @@ export class Runner {
         continue;
       }
       if (!fn.meta.safe) continue;
-      const r = await this.run(site, name);
+      if (fn.meta.params && Object.keys(fn.meta.params).length && !fn.meta.example) {
+        out.push({ name, ok: true, ms: 0, skipped: "has params but no meta.example" });
+        continue;
+      }
+      const r = await this.run(site, name, fn.meta.example ?? {});
       out.push({ name, ok: r.ok, ms: r.ms, ...(r.error ? { error: r.error, at: r.at } : {}) });
     }
     return out;
