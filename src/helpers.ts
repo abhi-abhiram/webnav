@@ -49,12 +49,15 @@ export function navigation(page: Page, site: string) {
   const origin = siteOrigin(site);
   return {
     origin,
-    // Go to a path on this site unless already exactly there.
+    // Go to a page of this site unless already exactly there. Use this when the function
+    // needs to start on a specific page.
     open: async (path = "/") => {
       const target = new URL(path, origin).href;
       if (page.url() !== target) await page.goto(target);
     },
-    // Go to a path only when the tab is on another site (or blank); otherwise stay.
+    // Only checks the origin: goes to the path when the tab is on another site (or blank) and
+    // otherwise stays on whatever page of this site it is on. Use it for steps that work from
+    // any page, such as clicking a link in a global nav.
     ensureOnSite: async (path = "/") => {
       if (!page.url().startsWith(origin + "/")) await page.goto(new URL(path, origin).href);
     },
