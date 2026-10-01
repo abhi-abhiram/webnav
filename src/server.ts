@@ -44,16 +44,21 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
         url: z.string().optional(),
         history: z.enum(["back", "forward", "reload"]).optional(),
         snapshot: z.boolean().optional().describe("Include the snapshot (default true)"),
+        cdp_endpoint: z.string().optional()
+          .describe("Switch this session to the browser at this local http:// or ws:// CDP endpoint, e.g. http://127.0.0.1:9222"),
       },
       annotations: live,
-    }, safe(async a => browser.use(async page => {
-      if (a.url) await page.goto(a.url);
-      else if (a.history === "back") await page.goBack();
-      else if (a.history === "forward") await page.goForward();
-      else if (a.history === "reload") await page.reload();
-      await settle(page);
-      return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
-    })));
+    }, safe(async a => {
+      if (a.cdp_endpoint) await browser.attachTo(a.cdp_endpoint);
+      return browser.use(async page => {
+        if (a.url) await page.goto(a.url);
+        else if (a.history === "back") await page.goBack();
+        else if (a.history === "forward") await page.goForward();
+        else if (a.history === "reload") await page.reload();
+        await settle(page);
+        return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
+      });
+    }));
 
     server.registerTool("browser_snapshot", {
       description: "Accessibility tree of the current page with [ref=…] handles for browser_act. Use within/depth to read one part of a large page. Refs stay valid until that element changes.",

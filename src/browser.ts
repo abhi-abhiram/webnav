@@ -334,6 +334,18 @@ export class BrowserManager {
     return withFileLock(this.opts.lockPath, timeoutMs, async () => fn(await this.page()));
   }
 
+  // Switch this session to another browser. The previous browser keeps running; only our
+  // tab in it is closed (Playwright has no way to drop a CDP connection without closing).
+  async attachTo(endpoint: string): Promise<void> {
+    validateEndpoint(endpoint);
+    await withFileLock(this.opts.lockPath, 30_000, async () => {
+      await this.close();
+      this.opts = { ...this.opts, cdpEndpoint: endpoint, userDataDir: undefined, profileDirectory: undefined, launch: undefined };
+      this.profile = undefined;
+      this.userDataDir = undefined;
+    });
+  }
+
   async close(): Promise<void> {
     if (this.opts.launch) {
       await this.context?.close().catch(() => {});
