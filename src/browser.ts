@@ -296,6 +296,12 @@ export async function act(page: Page, input: ActInput): Promise<void> {
   }
 }
 
+// Playwright emulates media features (prefers-color-scheme: light by default) on every page it
+// attaches to, which turns the user's own tabs to light mode while webnav is connected. Media
+// emulation is not webnav's business, so keep the browser's real settings everywhere.
+const realMedia = { colorScheme: null, reducedMotion: null, forcedColors: null, contrast: null } as const;
+const keepRealMedia = (page: Page) => { page.emulateMedia(realMedia).catch(() => {}); };
+
 // Owns one dedicated tab in an already-running browser profile.
 export class BrowserManager {
   private browser: Browser | null = null;
@@ -324,7 +330,7 @@ export class BrowserManager {
     if (this.opts.launch) {
       log("launching browser with", this.opts.launch.userDataDir);
       this.context = await chromium.launchPersistentContext(this.opts.launch.userDataDir, {
-        headless: false, viewport: null,
+        headless: false, viewport: null, ...realMedia,
         executablePath: this.opts.launch.executable ?? findExecutable(this.opts.launch.userDataDir),
       });
       this.context.on("close", () => { this.context = null; this.tab = null; });
@@ -339,6 +345,8 @@ export class BrowserManager {
     this.browser.on("disconnected", () => { this.browser = null; this.context = null; this.tab = null; });
     const context = this.browser.contexts()[0];
     if (!context) throw new Error("connected browser has no default profile context");
+    context.pages().forEach(keepRealMedia);
+    context.on("page", keepRealMedia);
     this.context = context;
     return context;
   }
