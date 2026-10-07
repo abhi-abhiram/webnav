@@ -7,11 +7,13 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { Locator, Page } from "playwright-core";
 import type { Item } from "./helpers.ts";
+import { validateContracts, type Contracts } from "./contracts.ts";
+import { policySchema, type SitePolicy } from "./policy.ts";
 
 const exec = promisify(execFile);
 
 // safe: no side effects, so fn_check may run it (with example args when it has params).
-export type FunctionMeta = {
+export type FunctionMeta = Contracts & {
   description: string;
   params?: Record<string, string>;
   safe?: boolean;
@@ -31,7 +33,7 @@ export type FunctionContext = {
   escape: (text: string) => string;
   pick: (trigger: Locator, options: string | RegExp | (string | RegExp)[]) => Promise<void>;
 };
-export type SiteFunction = { meta: FunctionMeta; run: (ctx: FunctionContext) => Promise<unknown> };
+export type SiteFunction = { meta: FunctionMeta; run: (ctx: FunctionContext) => Promise<unknown>; verify?: (ctx: FunctionContext, result: unknown) => Promise<void | boolean> };
 export type RunRecord = { t: string; name: string; ok: boolean; ms: number; error?: string; url?: string };
 
 const functionName = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
@@ -58,6 +60,8 @@ async function importFresh(file: string): Promise<any> {
 export function validateFunction(mod: any, label: string): SiteFunction {
   if (typeof mod?.run !== "function") throw new Error(`${label} must export async function run(ctx)`);
   if (typeof mod?.meta?.description !== "string") throw new Error(`${label} must export meta = { description: "..." }`);
+  validateContracts(mod.meta);
+  if (mod.verify !== undefined && typeof mod.verify !== "function") throw new Error(`${label}.verify must be a function`);
   return mod as SiteFunction;
 }
 
@@ -125,6 +129,27 @@ export class Sites {
     const out = [];
     for (const e of entries.filter(e => e.isDirectory())) out.push({ site: e.name, functions: (await this.names(e.name)).length });
     return out;
+  }
+
+  async policy(site: string): Promise<SitePolicy | null> {
+    try { return policySchema.parse(JSON.parse(await readFile(join(this.dir(site), "policy.json"), "utf8"))); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  }
+
+  async writePolicy(site: string, value: unknown, message?: string): Promise<string | null> {
+    const policy = policySchema.parse(value);
+    const key = await this.ensure(site);
+    await writeFile(join(this.dir(key), "policy.json"), JSON.stringify(policy, null, 2) + "\n");
+    return this.commit(key, `policy: ${message ?? "update scope"}`);
+  }
+
+  // Include every function and shared UI/policy so nested-call edits invalidate cached reads.
+  async fingerprint(site: string): Promise<string> {
+    const hash = createHash("sha256");
+    for (const file of ["ui.ts", "policy.json", ...(await this.names(site)).map(n => `functions/${n}.ts`)]) {
+      hash.update(file).update("\0").update(await readFile(join(this.dir(site), file), "utf8").catch(error => { if (error.code === "ENOENT") return ""; throw error; }));
+    }
+    return hash.digest("hex");
   }
 
   async notes(site: string): Promise<string> {
@@ -249,6 +274,7 @@ export class Sites {
       exists: existsSync(this.dir(key)),
       dir: this.dir(key),
       notes: await this.notes(key),
+      policy: await this.policy(key),
       ui: await readFile(this.file(key, "ui"), "utf8").catch(() => ""),
       functions,
     };

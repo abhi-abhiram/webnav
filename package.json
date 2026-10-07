@@ -12,7 +12,8 @@
   },
   "scripts": {
     "check": "tsc -p .",
-    "smoke": "node scripts/smoke.ts"
+    "smoke": "node scripts/smoke.ts && node scripts/regression.ts",
+    "browser-smoke": "node scripts/browser-smoke.ts"
   },
   "keywords": [
     "pi-package"
