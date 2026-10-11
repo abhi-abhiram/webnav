@@ -6,6 +6,9 @@ import { z } from "zod";
 import { act, actions, pageState, settle, snapshot, snapshotChanges, type BrowserManager } from "./browser.ts";
 import type { Runner, RunOptions } from "./runner.ts";
 import { siteKey, type Sites } from "./sites.ts";
+import { Artifacts } from "./artifacts.ts";
+import { policySchema, withPolicy } from "./policy.ts";
+import type { Page } from "playwright-core";
 
 export const version = "0.1.0";
 
@@ -56,6 +59,12 @@ const site = z.string().describe("Site host such as app.example.com or localhost
 const fnName = z.string().describe('Function name (letters, digits, _), or "ui" for the shared locator file');
 const args = z.record(z.string(), z.unknown()).optional().describe("Arguments passed to the function as ctx.args");
 const runFlags = {
+  approved: z.boolean().optional().describe("Explicit user approval for this run's writes when required by site policy"),
+  fresh: z.boolean().optional().describe("Bypass an opt-in read cache (reset/record also bypass it)"),
+  diagnostics: z.enum(["compact", "full"]).optional().describe("Failure diagnostics: compact error/state by default; full opts into DOM snapshot and screenshot capture"),
+  max_result_chars: z.number().int().min(256).max(100_000).optional().describe("Inline JSON result budget (default 8000); overflow is stored privately and returned as an artifact reference"),
+  result_fields: z.array(z.string().min(1)).max(50).optional().describe("Project own-property dot paths, e.g. count or coverage.complete; no expressions"),
+  store_result: z.boolean().optional().describe("Store the full result as a private artifact even when the inline projection fits"),
   timeout_ms: z.number().int().min(1000).max(600_000).optional()
     .describe("Whole-run limit (default 60000). On timeout the function is stopped by closing its tab"),
   action_timeout_ms: z.number().int().min(500).max(120_000).optional()
@@ -65,6 +74,13 @@ const runFlags = {
 
 export function createServer({ browser, sites, runner, dataDir, browserTools }: Deps): McpServer {
   const server = new McpServer({ name: "webnav", version });
+  const artifacts = new Artifacts(dataDir);
+  const scopedUse = <T>(target: string | undefined, fn: (page: Page) => Promise<T>) => browser.use(async page => {
+    const url = target ?? page.url();
+    if (url === "about:blank") return fn(page);
+    const key = siteKey(url);
+    return withPolicy(page, key, await sites.policy(key), fn);
+  });
   const safe = guarded(() => browser.takeNotices());
   const read = { readOnlyHint: true, openWorldHint: false };
   const live = { readOnlyHint: false, openWorldHint: true };
@@ -81,8 +97,8 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
       },
       annotations: live,
     }, safe(async a => {
-      if (a.cdp_endpoint) await browser.attachTo(a.cdp_endpoint);
-      return browser.use(async page => {
+      if (a.cdp_endpoint) { await browser.attachTo(a.cdp_endpoint); runner.clearCache(); }
+      return scopedUse(a.url, async page => {
         if (a.url) await page.goto(a.url);
         else if (a.history === "back") await page.goBack();
         else if (a.history === "forward") await page.goForward();
@@ -100,13 +116,14 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
         max_chars: z.number().int().min(1000).max(100_000).optional(),
       },
       annotations: read,
-    }, safe(async a => browser.use(async page =>
+    }, safe(async a => scopedUse(undefined, async page =>
       text(await pageState(page), await snapshot(page, { within: a.within, depth: a.depth, maxChars: a.max_chars })))));
 
     server.registerTool("browser_act", {
       description: "Perform one interaction on the current page, by snapshot ref or Playwright selector, then return the new state and snapshot. press without a target sends the key to the page; scroll without a target scrolls by value pixels.",
       inputSchema: {
         action: z.enum(actions),
+        approved: z.boolean().optional().describe("Explicit user approval when site policy requires it for browser interactions"),
         ref: z.string().optional().describe("Ref from the latest snapshot, e.g. e12"),
         selector: z.string().optional().describe('Playwright selector, e.g. role=button[name="Save"] or text=Billing'),
         value: z.string().optional().describe("Text for fill/type, key for press (e.g. Enter), option for select, pixels for scroll"),
@@ -116,8 +133,11 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
           .describe("What to return afterwards: changes since the last snapshot (default), the full tree, or nothing"),
       },
       annotations: live,
-    }, safe(async a => browser.use(async page => {
-      await act(page, a);
+    }, safe(async a => scopedUse(undefined, async page => {
+      const policy = page.url() === "about:blank" ? null : await sites.policy(siteKey(page.url()));
+      if (policy?.require_write_approval && !a.approved) throw new Error("site policy requires approved: true for browser interactions");
+      // Any interaction may change what cached reads return, even one that throws partway.
+      try { await act(page, a); } finally { runner.clearCache(); }
       await settle(page);
       const mode = a.snapshot ?? "changes";
       const tree = mode === "none" ? "" : mode === "full" ? await snapshot(page) : await snapshotChanges(page);
@@ -128,8 +148,8 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
       description: "Screenshot of the current page. Prefer snapshots for finding elements; use this to check how something looks.",
       inputSchema: { full_page: z.boolean().optional() },
       annotations: read,
-    }, safe(async a => browser.use(async page => {
-      await mkdir(join(dataDir, "screenshots"), { recursive: true });
+    }, safe(async a => scopedUse(undefined, async page => {
+      await mkdir(join(dataDir, "screenshots"), { recursive: true, mode: 0o700 });
       const path = join(dataDir, "screenshots", `shot-${Date.now()}.png`);
       await page.screenshot({ path, fullPage: a.full_page });
       return {
@@ -158,6 +178,30 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
     inputSchema: { site, markdown: z.string(), message: z.string().optional().describe("Short commit message") },
     annotations: { readOnlyHint: false, openWorldHint: false },
   }, safe(async a => text({ commit: await sites.writeNotes(a.site, a.markdown, a.message) })));
+
+  server.registerTool("site_set_policy", {
+    description: "Set reviewed URL-scope patterns and optional write approval for a site, committed to its git history. Missing policy preserves existing behavior. Guards trusted browser operations; not a sandbox for local code.",
+    inputSchema: { site, policy: policySchema, message: z.string().optional() },
+    annotations: { readOnlyHint: false, openWorldHint: false },
+  }, safe(async a => text({ commit: await sites.writePolicy(a.site, a.policy, a.message), cache_cleared: runner.clearCache(a.site) })));
+
+  server.registerTool("artifact_read", {
+    description: "Read a private stored JSON result in bounded character slices without rerunning the function. Optional case-insensitive find locates a passage. IDs are generated by fn_run/fn_try; arbitrary file paths are not accepted.",
+    inputSchema: { id: z.string(), offset: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(30_000).optional(), find: z.string().min(1).max(500).optional() },
+    annotations: read,
+  }, safe(async a => text(await artifacts.read(a.id, a.offset, a.limit, a.find))));
+
+  server.registerTool("fn_cache_clear", {
+    description: "Clear this process's opt-in read cache for one site or all sites. Writes and source/UI/policy changes already invalidate it; use fresh=true after login/account changes.",
+    inputSchema: { site: site.optional() },
+    annotations: { readOnlyHint: false, openWorldHint: false },
+  }, safe(async a => text({ cleared: runner.clearCache(a.site) })));
+
+  server.registerTool("fn_diagnostics", {
+    description: "Inspect the current tab after a failure without rerunning the function or its side effects. Returns state and a bounded accessibility snapshot; policy-denied pages are not read. Timed-out runs have already closed their original tab.",
+    inputSchema: { site },
+    annotations: read,
+  }, safe(async a => text(await runner.diagnostics(a.site))));
 
   server.registerTool("fn_read", {
     description: "Source of a function or of ui.ts, optionally at an earlier git revision (see site_history).",
@@ -193,21 +237,23 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
     annotations: live,
   }, safe(async (a, extra: Extra) => {
     const result = await runner.try(a.site, a.code, a.args, {
-      timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, reset: a.reset, ...runControls(extra),
+      timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, reset: a.reset, approved: a.approved, diagnostics: a.diagnostics,
+      maxResultChars: a.max_result_chars, resultFields: a.result_fields, storeResult: a.store_result, ...runControls(extra),
     });
-    if (!result.ok || !a.save_as) return text(result);
+    if (!result.ok || result.output_error || !a.save_as) return text(result);
     return text({ ...result, saved: await sites.save(a.site, a.save_as, a.code, a.message) });
   }));
 
   server.registerTool("fn_run", {
-    description: "Run a saved function in the browser tab. On failure returns the error, the failing line, page state, a snapshot, a screenshot path and dependent functions, so the function can be fixed. record=true saves a webm with a visible cursor.",
+    description: "Run a saved function with contracts/postconditions, URL-scope policy and opt-in read caching. Defaults to bounded inline output/artifact overflow and compact errors. Use fn_diagnostics without rerunning, or diagnostics=full for snapshot/screenshot capture. record=true saves a webm.",
     inputSchema: {
       site, name: z.string(), args, ...runFlags,
       record: z.boolean().optional(),
     },
     annotations: live,
   }, safe(async (a, extra: Extra) => text(await runner.run(a.site, a.name, a.args, {
-    timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, reset: a.reset, record: a.record, ...runControls(extra),
+    timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, reset: a.reset, record: a.record, approved: a.approved, fresh: a.fresh, diagnostics: a.diagnostics,
+    maxResultChars: a.max_result_chars, resultFields: a.result_fields, storeResult: a.store_result, ...runControls(extra),
   }))));
 
   server.registerTool("fn_status", {

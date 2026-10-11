@@ -15,9 +15,10 @@ Agent + skills/webnav ──MCP stdio──> src/server.ts (tool schemas)
 The server is thin. Knowledge lives in files the agent writes and maintains:
 - **Notes** (`notes.md`): the site in prose: pages, how to reach them, quirks. They keep the *intent*, so a broken function can be rewritten from them.
 - **Shared locators** (`ui.ts`): one place to fix when the UI moves.
+- **Policy** (`policy.json`, optional): reviewed pathname patterns and write-approval requirements, committed with the same history.
 - **Functions** (`functions/*.ts`): small Playwright routines that call each other via `call`. Each one ends by waiting for proof of its result.
 
-Running a function is its own test. A failure returns the error, the failing `file:line`, page state, a trimmed accessibility snapshot, a screenshot and the functions that depend on it, which is what an agent needs to repair it.
+Running a function is its own test. Optional argument/result contracts and `verify` postconditions must pass before a success is accepted. Failures default to compact error, `file:line`, state and dependents; `diagnostics: full` opts into snapshot/screenshot capture, or `fn_diagnostics` reads the current tab without replaying the function.
 
 ## Browser
 - Attach only by default: an explicit endpoint (`--cdp-endpoint`, `WEBNAV_CDP_ENDPOINT`, or `browser_open { cdp_endpoint }` mid-session), else the `DevToolsActivePort` of a running browser (found in known user data dirs, or the one given), else port 9222. The file outlives its browser, so when the port serves `/json/version` the browser id must match. Launching requires `--launch-user-data-dir`.
@@ -33,8 +34,12 @@ Running a function is its own test. A failure returns the error, the failing `fi
 - The run log (`runs/<host>.jsonl`) is append-only and supplies `last_run` in `site_get`.
 - A run stops on timeout, `fn_abort` or client cancellation. A promise cannot be cancelled, so webnav closes the run's tab: the function's pending and later Playwright calls fail, and the lock is released. The next call opens a new tab.
 - `log()` lines are kept for `fn_status` and sent as MCP progress notifications when the client asks for progress.
-- Failure snapshots list open dialogs before the page, so the part a step failed in is not cut off.
+- Explicit full failure snapshots list open dialogs before the page; denied pages never trigger DOM/title/screenshot diagnostics.
+- `policy.ts` supplies the per-operation page/locator URL guard and main-frame navigation routing, reused by function execution and browser tools. It guards trusted-code scope drift, not arbitrary code/data access.
+- `contracts.ts` validates a strict, documented JSON Schema subset and effect/cache metadata. Unsupported contracts fail rather than being silently ignored.
+- `artifacts.ts` stores complete oversized/explicitly persisted JSON results privately and serves bounded reads by generated ID. Output projection never changes values received by nested functions or postconditions.
+- Runner read caches are opt-in, process-local, TTL/memory-bounded and keyed by arguments plus site source/UI/policy hashes. Writes clear them; health checks bypass them. Cached state is historical, never presented as a fresh page observation.
 - Recording uses `page.screencast` with action overlays.
 
 ## Not here (on purpose)
-No graph engine, fingerprints or crawler: exploration is agent-driven and guided by the skill. No sandbox: functions are trusted local code, reviewed through git history.
+No graph engine, DOM fingerprinting or crawler: exploration is agent-driven and guided by the skill. Site-specific coverage, incremental watermarks and parsers remain in site functions. No sandbox: functions are trusted local code, reviewed through git history. See [efficient automation](efficient-automation.md) for defaults and guard limitations.

@@ -7,8 +7,14 @@ import { defaultActionTimeout, pageState, settle, snapshot, type BrowserManager,
 import { escape, items, navigation, pick } from "./helpers.ts";
 import { log } from "./paths.ts";
 import { siteKey, validateFunction, type FunctionContext, type SiteFunction, type Sites } from "./sites.ts";
+import { assertSchema, canonical } from "./contracts.ts";
+import { Artifacts, json, type OutputOptions } from "./artifacts.ts";
+import { assertEffect, assertUrl, PolicyError, withPolicy } from "./policy.ts";
 
-export type RunOptions = {
+export type RunOptions = OutputOptions & {
+  approved?: boolean;
+  fresh?: boolean;
+  diagnostics?: "compact" | "full";
   timeoutMs?: number;
   record?: boolean;
   // Reload the page before running, clearing leftover dialogs and half-filled forms.
@@ -24,6 +30,14 @@ export type RunResult = {
   ok: boolean;
   ms: number;
   result?: unknown;
+  artifact?: { id: string; chars: number };
+  result_omitted?: boolean;
+  result_chars?: number;
+  preview?: string;
+  output_error?: string;
+  retry_warning?: string;
+  cached?: boolean;
+  cache_age_ms?: number;
   error?: string;
   at?: string;
   aborted?: boolean;
@@ -59,14 +73,6 @@ function locate(error: unknown, roots: string[]): string | undefined {
   return undefined;
 }
 
-function compact(value: unknown): unknown {
-  if (value === undefined) return undefined;
-  const text = JSON.stringify(value);
-  if (text === undefined) return String(value);
-  // Retrieval functions return real data; only guard against runaway output.
-  return text.length > 100_000 ? text.slice(0, 100_000) + "… truncated" : value;
-}
-
 // An open dialog is usually what a failed step was working in, so it leads the failure snapshot
 // and is never cut off by a long page.
 async function failureSnapshot(page: Page): Promise<string> {
@@ -87,10 +93,43 @@ export class Runner {
   private browser: BrowserManager;
   private dataDir: string;
   private current: Current | null = null;
+  private artifacts: Artifacts;
+  private cache = new Map<string, { site: string; at: number; expires: number; text: string; state?: PageState }>();
   constructor(sites: Sites, browser: BrowserManager, dataDir: string) {
     this.sites = sites;
     this.browser = browser;
     this.dataDir = dataDir;
+    this.artifacts = new Artifacts(dataDir);
+  }
+
+  // Bumped on every invalidation, so a read that was already running cannot cache a result
+  // that a later write (or browser interaction) has made stale.
+  private generation = 0;
+  clearCache(site?: string): number {
+    this.generation++;
+    let removed = 0;
+    for (const [key, entry] of this.cache) if (!site || entry.site === siteKey(site)) { this.cache.delete(key); removed++; }
+    return removed;
+  }
+
+  async diagnostics(site: string) {
+    const key = siteKey(site), policy = await this.sites.policy(key);
+    return this.browser.use(page => withPolicy(page, key, policy, async scoped => {
+      assertUrl(key, policy, page.url());
+      return { state: await pageState(scoped), snapshot: await failureSnapshot(scoped) };
+    }));
+  }
+
+  private async publish(result: RunResult, opts: RunOptions): Promise<RunResult> {
+    if (!result.ok) return result;
+    const { result: value, ...rest } = result;
+    try { return { ...rest, ...await this.artifacts.output(value, opts) }; }
+    catch (error) {
+      // Preserve recoverable output even if a requested projection was wrong; never replay.
+      let artifact: RunResult["artifact"];
+      try { if (value !== undefined) artifact = await this.artifacts.save(json(value)); } catch {}
+      return { ...rest, ...(artifact ? { artifact } : {}), result_omitted: true, output_error: `${(error as Error).message}; function already completed, do not retry a write` };
+    }
   }
 
   // What is running now, for fn_status.
@@ -110,9 +149,16 @@ export class Runner {
   private async execute(site: string, label: string, fn: SiteFunction, args: Record<string, unknown>, opts: RunOptions): Promise<RunResult> {
     const key = siteKey(site);
     const timeoutMs = opts.timeoutMs ?? 60_000;
+    if (opts.signal?.aborted) throw new Error("cancelled by the client");
+    const policy = await this.sites.policy(key);
+    assertEffect(policy, fn.meta.effect, fn.meta.safe, opts.approved);
+    assertSchema(fn.meta.argsSchema, args, `${label} arguments`);
     // Stacks show plain paths (Playwright) or file URLs (Node), so match both.
     const roots = [this.sites.dir(key), join(this.dataDir, "tmp")].flatMap(p => [p, pathToFileURL(p).href]);
+    const writes = fn.meta.effect !== "read";
     return this.browser.use(async (page: Page) => {
+      // Invalidate inside the lock too: reads that held it before this write may have cached since.
+      if (writes) this.clearCache(key);
       const start = Date.now();
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
@@ -121,11 +167,13 @@ export class Runner {
       const current: Current = { site: key, name: label, start, page, log: [], abort };
       this.current = current;
       const sites = this.sites;
-      const ui = await sites.loadUi(key);
+      let ui: Record<string, any> = {};
+      let guardedPage = page;
       const stack: string[] = [label];
-      const nav = navigation(page, key);
+      // Effects of the functions currently running, so a write anywhere beneath a read fails.
+      const effects: (string | undefined)[] = [];
       const context = (a: Record<string, unknown>): FunctionContext => ({
-        page, args: a, ui, site: key, call, items, escape, pick, ...nav,
+        page: guardedPage, args: a, ui, site: key, call, items, escape, pick, ...navigation(guardedPage, key),
         log: (...parts) => {
           const message = `${stack.at(-1)}: ${parts.map(String).join(" ")}`;
           log(`${key}/${message}`);
@@ -138,49 +186,78 @@ export class Runner {
         if (stack.includes(name) || stack.length >= 8) throw new Error(`call loop: ${[...stack, name].join(" → ")}`);
         stack.push(name);
         try {
-          return await (await sites.load(key, name)).run(context(a));
+          return await invoke(await sites.load(key, name), a, name);
         } finally {
           stack.pop();
         }
+      }
+      async function invoke(target: SiteFunction, a: Record<string, unknown>, name: string) {
+        assertEffect(policy, target.meta.effect, target.meta.safe, opts.approved);
+        if (effects.includes("read") && target.meta.effect === "write") throw new Error("read functions cannot call write functions");
+        assertSchema(target.meta.argsSchema, a, `${name} arguments`);
+        const ctx = context(a);
+        effects.push(target.meta.effect);
+        let value: unknown, verified: unknown;
+        try {
+          value = await target.run(ctx);
+          assertSchema(target.meta.resultSchema, value, `${name} result`);
+          verified = await target.verify?.(ctx, value);
+        } finally { effects.pop(); }
+        if (verified === false) throw new Error(`${name} postcondition failed`);
+        if (verified !== undefined && verified !== true) throw new Error(`${name}.verify must return void or boolean`);
+        return value;
       }
       let video: string | undefined;
       let stopActions: (() => Promise<void>) | undefined;
       if (opts.actionTimeoutMs) page.setDefaultTimeout(opts.actionTimeoutMs);
       try {
-        if (opts.reset && page.url() !== "about:blank") {
-          await page.reload();
-          await settle(page);
-        }
-        if (opts.record) {
-          await mkdir(join(this.dataDir, "videos"), { recursive: true });
-          video = join(this.dataDir, "videos", `${key}-${label}-${stamp()}.webm`);
-          await page.screencast.start({ path: video });
-          const shown = await page.screencast.showActions({ cursor: "pointer" });
-          stopActions = () => shown.dispose();
-        }
-        // After an abort the function keeps running until its page calls fail; whichever promise
-        // loses the race must not become an unhandled rejection.
-        const running = fn.run(context(args));
+        // Scope reset/record setup too: a reload may redirect, and setup must share the timeout.
+        const running = withPolicy(page, key, policy, async scoped => {
+          guardedPage = scoped;
+          ui = await sites.loadUi(key);
+          if (opts.reset || opts.record) assertUrl(key, policy, page.url());
+          if (opts.reset && page.url() !== "about:blank") {
+            await scoped.reload();
+            await settle(scoped);
+          }
+          if (opts.record) {
+            await mkdir(join(this.dataDir, "videos"), { recursive: true, mode: 0o700 });
+            video = join(this.dataDir, "videos", `${key}-${label}-${stamp()}.webm`);
+            await scoped.screencast.start({ path: video });
+            const shown = await scoped.screencast.showActions({ cursor: "pointer" });
+            stopActions = () => shown.dispose();
+          }
+          if (abort.signal.aborted) throw abort.signal.reason;
+          const result = await invoke(fn, args, label);
+          return { result, state: await pageState(scoped) };
+        });
+        // A losing promise must not become an unhandled rejection after abort closes its tab.
         const stopped = untilAborted(abort.signal);
         running.catch(() => {});
         stopped.catch(() => {});
         const result = await Promise.race([running, stopped]);
-        return { ok: true, ms: Date.now() - start, result: compact(result), state: await pageState(page), video };
+        return { ok: true, ms: Date.now() - start, ...result, video };
       } catch (error) {
         const aborted = abort.signal.aborted;
         const failed: RunResult = {
           ok: false,
           ms: Date.now() - start,
-          error: String((error as Error)?.message ?? error).replace(/\u001b\[[0-9;]*m/g, "").split("\n").slice(0, 6).join("\n"),
+          error: String((error as Error)?.message ?? error).replace(/\u001b\[[0-9;]*m/g, "").split("\n").slice(0, 6).join("\n").slice(0, 2000),
           at: locate(error, roots),
+          ...(fn.meta.effect !== "read" && !fn.meta.safe ? { retry_warning: "Writes may already have occurred. Inspect current state; do not automatically retry." } : {}),
           ...(aborted ? { aborted: true } : {}),
           video,
         };
-        failed.state = await pageState(page).catch(() => undefined);
-        failed.snapshot = await failureSnapshot(page);
-        await mkdir(join(this.dataDir, "screenshots"), { recursive: true });
-        const shot = join(this.dataDir, "screenshots", `${key}-${label}-${stamp()}.png`);
-        failed.screenshot = await page.screenshot({ path: shot }).then(() => shot, () => undefined);
+        // Never capture DOM/title/screenshots from a policy-denied page.
+        let permitted = !(error instanceof PolicyError);
+        try { assertUrl(key, policy, page.url()); } catch { permitted = false; }
+        failed.state = permitted ? await pageState(page).catch(() => undefined) : { url: page.url(), title: "", login_suspected: false };
+        if (permitted && opts.diagnostics === "full") {
+          failed.snapshot = await failureSnapshot(page);
+          await mkdir(join(this.dataDir, "screenshots"), { recursive: true, mode: 0o700 });
+          const shot = join(this.dataDir, "screenshots", `${key}-${label}-${stamp()}.png`);
+          failed.screenshot = await page.screenshot({ path: shot }).then(() => shot, () => undefined);
+        }
         if (aborted) {
           // The function may still be running; closing its tab makes its pending and later
           // Playwright calls fail, so it cannot keep driving the browser or holding the lock.
@@ -191,6 +268,7 @@ export class Runner {
         }
         return failed;
       } finally {
+        if (writes) this.clearCache(key);
         clearTimeout(timer);
         opts.signal?.removeEventListener("abort", cancelled);
         if (this.current === current) this.current = null;
@@ -202,14 +280,34 @@ export class Runner {
   }
 
   async run(site: string, name: string, args: Record<string, unknown> = {}, opts: RunOptions = {}): Promise<RunResult> {
+    if (opts.signal?.aborted) throw new Error("cancelled by the client");
     const fn = await this.sites.load(site, name);
+    assertEffect(await this.sites.policy(siteKey(site)), fn.meta.effect, fn.meta.safe, opts.approved);
+    assertSchema(fn.meta.argsSchema, args, `${name} arguments`);
+    const cacheable = fn.meta.effect === "read" && fn.meta.cacheTtlMs !== undefined;
+    const cacheKey = cacheable ? canonical([siteKey(site), name, await this.sites.fingerprint(site), args]) : "";
+    const entry = this.cache.get(cacheKey);
+    if (entry && entry.expires > Date.now() && !opts.fresh && !opts.reset && !opts.record) {
+      return this.publish({ ok: true, ms: 0, result: JSON.parse(entry.text), state: entry.state, cached: true, cache_age_ms: Date.now() - entry.at }, opts);
+    }
+    if (fn.meta.effect !== "read") this.clearCache(site);
+    const generation = this.generation;
     const result = await this.execute(site, name, fn, args, opts);
+    if (result.ok && cacheable && generation === this.generation && result.result !== undefined && !opts.record) {
+      try {
+        const text = json(result.result), at = Date.now();
+        if (text.length <= 1_000_000) {
+          this.cache.set(cacheKey, { site: siteKey(site), at, expires: at + fn.meta.cacheTtlMs!, text, state: result.state });
+          while (this.cache.size > 64 || [...this.cache.values()].reduce((n, e) => n + e.text.length, 0) > 8_000_000) this.cache.delete(this.cache.keys().next().value!);
+        }
+      } catch {} // Non-JSON output is reported by publish, never cached.
+    }
     if (!result.ok) result.dependents = await this.sites.dependents(site, name);
     await this.sites.recordRun(site, {
       t: new Date().toISOString(), name, ok: result.ok, ms: result.ms,
       ...(result.error ? { error: result.error.split("\n")[0] } : {}), url: result.state?.url,
     });
-    return result;
+    return this.publish(result, opts);
   }
 
   // Runs unsaved code so an agent can iterate before fn_save.
@@ -220,7 +318,8 @@ export class Runner {
     await writeFile(file, code);
     try {
       const fn = validateFunction(await import(pathToFileURL(file).href), "draft");
-      return await this.execute(site, "draft", fn, args, opts);
+      this.clearCache(site);
+      return await this.publish(await this.execute(site, "draft", fn, args, opts), opts);
     } finally {
       await rm(file, { force: true });
     }
@@ -238,12 +337,14 @@ export class Runner {
         continue;
       }
       if (!fn.meta.safe) continue;
-      if (fn.meta.params && Object.keys(fn.meta.params).length && !fn.meta.example) {
+      if (!fn.meta.example && ((fn.meta.params && Object.keys(fn.meta.params).length) || (Array.isArray(fn.meta.argsSchema?.required) && fn.meta.argsSchema.required.length))) {
         out.push({ name, ok: true, ms: 0, skipped: "has params but no meta.example" });
         continue;
       }
-      const r = await this.run(site, name, fn.meta.example ?? {});
-      out.push({ name, ok: r.ok, ms: r.ms, ...(r.error ? { error: r.error, at: r.at } : {}) });
+      try {
+        const r = await this.run(site, name, fn.meta.example ?? {}, { fresh: true });
+        out.push({ name, ok: r.ok, ms: r.ms, ...(r.error ? { error: r.error, at: r.at } : {}) });
+      } catch (error) { out.push({ name, ok: false, ms: 0, error: (error as Error).message }); }
     }
     return out;
   }

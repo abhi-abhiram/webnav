@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import { withFileLock } from "./lock.ts";
 import { log } from "./paths.ts";
+import { unscoped } from "./policy.ts";
 
 export type BrowserOptions = {
   cdpEndpoint?: string;
@@ -207,13 +208,14 @@ const truncate = (text: string, maxChars: number) =>
 
 // Last full-page snapshot per tab, so actions can report only what changed.
 const lastSnapshot = new WeakMap<Page, string>();
+const tab = (page: Page): Page => (page as any)[unscoped] ?? page;
 
 export type SnapshotOptions = { maxChars?: number; within?: string; depth?: number };
 
 export async function snapshot(page: Page, opts: SnapshotOptions = {}): Promise<string> {
   const target = opts.within ? page.locator(opts.within).first() : page;
   const tree = await target.ariaSnapshot({ mode: "ai", depth: opts.depth, timeout: 10_000 });
-  if (!opts.within && !opts.depth) lastSnapshot.set(page, tree);
+  if (!opts.within && !opts.depth) lastSnapshot.set(tab(page), tree);
   return truncate(tree, opts.maxChars ?? 15_000);
 }
 
@@ -236,9 +238,9 @@ async function stableTree(page: Page, budgetMs = 2_000): Promise<string> {
 // Lines added since the last snapshot, with their ancestor lines for context. Refs are stable
 // between snapshots, so unchanged elements produce identical lines.
 export async function snapshotChanges(page: Page, maxChars = 15_000): Promise<string> {
-  const before = lastSnapshot.get(page);
+  const before = lastSnapshot.get(tab(page));
   const after = await stableTree(page);
-  lastSnapshot.set(page, after);
+  lastSnapshot.set(tab(page), after);
   const full = truncate(after, maxChars);
   if (!before) return full;
   const pool = new Map<string, number>();

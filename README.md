@@ -4,7 +4,9 @@ MCP server that lets agents **learn any website and reuse what they learned**. A
 
 - Attaches to the browser you already run, using your existing profile and logins. It never starts a browser unless you opt in.
 - Per-site knowledge is plain files in a git repo: `notes.md`, `ui.ts` (shared locators), `functions/*.ts`.
-- When a function fails, the result says what broke, where, and what the page looks like now, so the agent can fix it.
+- Optional URL-scope policies, function contracts and postconditions guard trusted automation against accidental scope drift and false success.
+- Bounded results, private artifact retrieval and opt-in read caching reduce repeated browser reads and output.
+- Failures default to compact errors/state; snapshots and screenshots are opt-in or available without replay through `fn_diagnostics`.
 - Functions can be recorded to webm with a visible cursor, e.g. for PR demos.
 
 ## Setup
@@ -14,7 +16,7 @@ Requires Node.js 22.18+ (TypeScript runs directly, no build step) and git.
 ```sh
 npm install
 npm run check   # typecheck
-npm run smoke   # stdio smoke run with temporary storage, no browser
+npm run smoke   # stdio + regression checks with temporary storage, no browser
 ```
 
 Enable remote debugging in the browser you normally use: open `chrome://inspect/#remote-debugging` (also `brave://inspect`, `edge://inspect`) and allow it, or start the browser with `--remote-debugging-port=9222`. webnav finds it in this order: `--cdp-endpoint` or `WEBNAV_CDP_ENDPOINT`; the `DevToolsActivePort` file in a known user data dir (ignored when it was left by a browser that has since closed); the browser on port 9222.
@@ -59,9 +61,11 @@ Both attach to the same running browser over CDP, and each keeps to its own tabs
 ~/.config/webnav/sites/<host>/      # one git repo per site; edit freely
   notes.md                          # map of pages, how to reach them, quirks
   ui.ts                             # shared locators
+  policy.json                       # optional reviewed path scope / write approval
   functions/<name>.ts               # reusable functions
 ~/.local/share/webnav/
   runs/<host>.jsonl                 # run log (last result per function)
+  artifacts/<uuid>.json             # private complete results; bounded retrieval
   screenshots/  videos/  tmp/
   browser.lock                      # serializes browser use across processes
 ```
@@ -90,16 +94,21 @@ export async function run({ page, args, call, ui, log }) {
 | `browser_act` | click, dblclick, right_click, hover, fill, type, clear, press, select, check, uncheck, upload, focus, scroll; returns only what changed by default |
 | `browser_screenshot` | Image of the page |
 | `site_list` / `site_get` | Known sites; notes, ui, functions and last runs |
-| `site_write_notes` | Replace notes (committed) |
+| `site_write_notes` / `site_set_policy` | Replace notes / validated scope policy (committed) |
 | `fn_read` / `fn_save` / `fn_delete` | Read, validate-and-commit, delete functions or `ui.ts` |
 | `site_history` | Git history; `fn_read` with `revision` restores old code |
 | `fn_try` | Run unsaved code; `save_as` saves it if the run succeeds |
-| `fn_run` | Run a function; failure details for repair; `record` for video; `reset` reloads first; `action_timeout_ms` fails fast |
+| `fn_run` | Run with contracts/postconditions, bounded results, opt-in read cache; `record` for video; `reset` reloads first |
 | `fn_status` / `fn_abort` | See what a long run is doing (URL, latest `log()` lines) / stop it |
-| `fn_check` | Run all `safe` functions |
+| `fn_check` | Run all `safe` functions, bypassing caches |
+| `artifact_read` | Retrieve private complete JSON results by ID, in bounded character slices |
+| `fn_cache_clear` | Clear opt-in process-local read caches |
+| `fn_diagnostics` | Inspect current state after a failure without replaying side effects |
+
+See [scoped, efficient automation](docs/efficient-automation.md) for policies, approval flags, argument/result contracts, `verify` postconditions, output projection/budgets and cache freshness. Existing functions need no new metadata; missing policies preserve their behavior. Default output/failure verbosity is intentionally reduced.
 
 ## Trust model
 
-Functions are local code written by agents and run with your logged-in browser session, without a sandbox. Every change is a commit in the site's repo, so review with `git log -p` in `~/.config/webnav/sites/<host>`. Page content is never executed as code. Keep CDP bound to loopback.
+Functions are local code written by agents and run with your logged-in browser session, without a sandbox. Every change is a commit in the site's repo, so review with `git log -p` in `~/.config/webnav/sites/<host>`. Page content is never executed as code. URL policies guard ordinary operations on the dedicated tab, not arbitrary Node/JavaScript execution, individual records, subframes, other tabs or external browser harnesses. They are not a security/privacy sandbox; keep explicit site-level restrictions and review code. Keep CDP bound to loopback.
 
 See [architecture](docs/architecture.md) and [AGENTS.md](AGENTS.md).

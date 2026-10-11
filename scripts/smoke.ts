@@ -22,7 +22,7 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 try {
   await client.connect(transport);
   const tools = (await client.listTools()).tools.map(t => t.name);
-  for (const t of ["browser_open", "browser_act", "site_get", "fn_save", "fn_run", "fn_try", "fn_status", "fn_abort"]) assert.ok(tools.includes(t), t);
+  for (const t of ["browser_open", "browser_act", "site_get", "fn_save", "fn_run", "fn_try", "fn_status", "fn_abort", "site_set_policy", "artifact_read", "fn_cache_clear", "fn_diagnostics"]) assert.ok(tools.includes(t), t);
 
   assert.equal((await call("fn_status")).text, "idle");
   assert.equal((await call("fn_abort")).text, "nothing is running");
@@ -54,6 +54,13 @@ export async function run({ call }) { return call("goToSettings"); }`;
   assert.match(info.notes, /Settings: main nav/);
   assert.match((await call("site_history", { site })).text, /fn\(goToSettings\): add/);
   assert.equal((await call("fn_save", { site, name: "../escape", code: fn })).error, true);
+  const policy = {allowed_paths: ["/dashboard*"], denied_paths: ["/discussion*"], require_write_approval: true};
+  assert.equal((await call("site_set_policy", {site, policy})).error, false);
+  assert.deepEqual(JSON.parse((await call("site_get", {site})).text).policy, policy);
+  assert.equal((await call("site_set_policy", {site, policy: {allowed_paths:["not/a/path"]}})).error, true);
+  assert.match((await call("site_history", {site})).text, /policy: update scope/);
+  assert.deepEqual(JSON.parse((await call("fn_cache_clear", {site})).text), {cleared:0});
+  assert.equal((await call("artifact_read", {id:"../escape"})).error, true);
   console.error("smoke ok");
 } finally {
   await client.close().catch(() => {});
