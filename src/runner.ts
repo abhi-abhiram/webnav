@@ -163,6 +163,8 @@ export class Runner {
       let ui: Record<string, any> = {};
       let guardedPage = page;
       const stack: string[] = [label];
+      // Effects of the functions currently running, so a write anywhere beneath a read fails.
+      const effects: (string | undefined)[] = [];
       const context = (a: Record<string, unknown>): FunctionContext => ({
         page: guardedPage, args: a, ui, site: key, call, items, escape, pick, ...navigation(guardedPage, key),
         log: (...parts) => {
@@ -184,12 +186,16 @@ export class Runner {
       }
       async function invoke(target: SiteFunction, a: Record<string, unknown>, name: string) {
         assertEffect(policy, target.meta.effect, target.meta.safe, opts.approved);
-        if (fn.meta.effect === "read" && target.meta.effect === "write") throw new Error("read functions cannot call write functions");
+        if (effects.includes("read") && target.meta.effect === "write") throw new Error("read functions cannot call write functions");
         assertSchema(target.meta.argsSchema, a, `${name} arguments`);
         const ctx = context(a);
-        const value = await target.run(ctx);
-        assertSchema(target.meta.resultSchema, value, `${name} result`);
-        const verified = await target.verify?.(ctx, value);
+        effects.push(target.meta.effect);
+        let value: unknown, verified: unknown;
+        try {
+          value = await target.run(ctx);
+          assertSchema(target.meta.resultSchema, value, `${name} result`);
+          verified = await target.verify?.(ctx, value);
+        } finally { effects.pop(); }
         if (verified === false) throw new Error(`${name} postcondition failed`);
         if (verified !== undefined && verified !== true) throw new Error(`${name}.verify must return void or boolean`);
         return value;
