@@ -136,7 +136,8 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
     }, safe(async a => scopedUse(undefined, async page => {
       const policy = page.url() === "about:blank" ? null : await sites.policy(siteKey(page.url()));
       if (policy?.require_write_approval && !a.approved) throw new Error("site policy requires approved: true for browser interactions");
-      await act(page, a);
+      // Any interaction may change what cached reads return, even one that throws partway.
+      try { await act(page, a); } finally { runner.clearCache(); }
       await settle(page);
       const mode = a.snapshot ?? "changes";
       const tree = mode === "none" ? "" : mode === "full" ? await snapshot(page) : await snapshotChanges(page);
