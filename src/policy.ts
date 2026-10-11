@@ -9,6 +9,8 @@ export const policySchema = z.object({
 }).strict();
 export type SitePolicy = z.infer<typeof policySchema>;
 export class PolicyError extends Error {}
+// Reads the real page behind a scoped proxy, so per-tab state (e.g. snapshot baselines) survives scoped calls.
+export const unscoped = Symbol("unscoped");
 
 function matches(path: string, pattern: string): boolean {
   const regex = pattern.split("*").map(p => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
@@ -64,6 +66,7 @@ export async function withPolicy<T>(page: Page, site: string, policy: SitePolicy
   const wrap = (target: any): any => {
     if (proxies.has(target)) return proxies.get(target);
     const proxy = new Proxy(target, { get(object, key) {
+      if (key === unscoped) return object;
       const value = Reflect.get(object, key, object);
       if (typeof value !== "function") return value && ["keyboard", "mouse", "touchscreen"].includes(String(key)) ? wrap(value) : value;
       return (...args: any[]) => {
