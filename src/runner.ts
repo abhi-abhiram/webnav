@@ -102,7 +102,11 @@ export class Runner {
     this.artifacts = new Artifacts(dataDir);
   }
 
+  // Bumped on every invalidation, so a read that was already running cannot cache a result
+  // that a later write (or browser interaction) has made stale.
+  private generation = 0;
   clearCache(site?: string): number {
+    this.generation++;
     let removed = 0;
     for (const [key, entry] of this.cache) if (!site || entry.site === siteKey(site)) { this.cache.delete(key); removed++; }
     return removed;
@@ -151,7 +155,10 @@ export class Runner {
     assertSchema(fn.meta.argsSchema, args, `${label} arguments`);
     // Stacks show plain paths (Playwright) or file URLs (Node), so match both.
     const roots = [this.sites.dir(key), join(this.dataDir, "tmp")].flatMap(p => [p, pathToFileURL(p).href]);
+    const writes = fn.meta.effect !== "read";
     return this.browser.use(async (page: Page) => {
+      // Invalidate inside the lock too: reads that held it before this write may have cached since.
+      if (writes) this.clearCache(key);
       const start = Date.now();
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
@@ -261,6 +268,7 @@ export class Runner {
         }
         return failed;
       } finally {
+        if (writes) this.clearCache(key);
         clearTimeout(timer);
         opts.signal?.removeEventListener("abort", cancelled);
         if (this.current === current) this.current = null;
@@ -283,8 +291,9 @@ export class Runner {
       return this.publish({ ok: true, ms: 0, result: JSON.parse(entry.text), state: entry.state, cached: true, cache_age_ms: Date.now() - entry.at }, opts);
     }
     if (fn.meta.effect !== "read") this.clearCache(site);
+    const generation = this.generation;
     const result = await this.execute(site, name, fn, args, opts);
-    if (result.ok && cacheable && result.result !== undefined && !opts.record) {
+    if (result.ok && cacheable && generation === this.generation && result.result !== undefined && !opts.record) {
       try {
         const text = json(result.result), at = Date.now();
         if (text.length <= 1_000_000) {
