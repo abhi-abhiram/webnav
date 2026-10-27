@@ -64,7 +64,7 @@ const runFlags = {
   diagnostics: z.enum(["compact", "full"]).optional().describe("Failure diagnostics: compact error/state by default; full opts into DOM snapshot and screenshot capture"),
   max_result_chars: z.number().int().min(256).max(100_000).optional().describe("Inline JSON result budget (default 8000); overflow is stored privately and returned as an artifact reference"),
   result_fields: z.array(z.string().min(1)).max(50).optional().describe("Project own-property dot paths, e.g. count or coverage.complete; no expressions"),
-  store_result: z.boolean().optional().describe("Store the full result as a private artifact even when the inline projection fits"),
+  store_result: z.boolean().optional().describe("Store the full result privately even when it fits inline; retain returned findings when result validation/postconditions fail"),
   timeout_ms: z.number().int().min(1000).max(600_000).optional()
     .describe("Whole-run limit (default 60000). On timeout the function is stopped by closing its tab"),
   action_timeout_ms: z.number().int().min(500).max(120_000).optional()
@@ -98,14 +98,21 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
       annotations: live,
     }, safe(async a => {
       if (a.cdp_endpoint) { await browser.attachTo(a.cdp_endpoint); runner.clearCache(); }
-      return scopedUse(a.url, async page => {
-        if (a.url) await page.goto(a.url);
-        else if (a.history === "back") await page.goBack();
-        else if (a.history === "forward") await page.goForward();
-        else if (a.history === "reload") await page.reload();
-        await settle(page);
-        return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
-      });
+      const navigates = !!(a.url || a.history);
+      if (navigates) runner.clearCache();
+      try {
+        return await scopedUse(a.url, async page => {
+          if (a.url) await page.goto(a.url);
+          else if (a.history === "back") await page.goBack();
+          else if (a.history === "forward") await page.goForward();
+          else if (a.history === "reload") await page.reload();
+          await settle(page);
+          return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
+        });
+      } finally {
+        // Redirects/reloads can change session state even when navigation fails.
+        if (navigates) runner.clearCache();
+      }
     }));
 
     server.registerTool("browser_snapshot", {
@@ -272,10 +279,18 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
   }));
 
   server.registerTool("fn_check", {
-    description: "Run every function marked meta.safe (no arguments) to detect site changes early.",
-    inputSchema: { site },
+    description: "Run safe functions with example arguments to detect drift, bypassing caches. Optionally select names and per-function timeouts. Unsafe functions never run; use result contracts/verify to make returned test failures fail the check.",
+    inputSchema: {
+      site,
+      names: z.array(z.string().min(1)).min(1).max(100).optional().describe("Check only these functions; unknown names fail before any runs"),
+      timeout_ms: runFlags.timeout_ms,
+      action_timeout_ms: runFlags.action_timeout_ms,
+      diagnostics: runFlags.diagnostics,
+    },
     annotations: live,
-  }, safe(async a => text(await runner.check(a.site))));
+  }, safe(async (a, extra: Extra) => text(await runner.check(a.site, {
+    names: a.names, timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, diagnostics: a.diagnostics, ...runControls(extra),
+  }))));
 
   return server;
 }

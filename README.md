@@ -46,10 +46,10 @@ Optionally install the workflow skill: `pi install /absolute/path/to/webnav`.
 | `--profile-directory "Profile 1"` | Open webnav's tab in that profile. Defaults to the profile pinned with pi-browser-harness (`/browser-profile`) when it is the same browser. |
 | `--cdp-endpoint <url>` | Explicit local `http://` or `ws://` endpoint. Also read from `WEBNAV_CDP_ENDPOINT`; `browser_open { cdp_endpoint }` switches a running session. |
 | `--browser-executable <path>` | Browser binary, if it is not found automatically (used to open a window in a profile). |
-| `--launch-user-data-dir <dir>` | **Opt-in only:** launch a browser with this user data dir instead of attaching. |
+| `--launch-user-data-dir <dir>` | **Opt-in only:** launch a headless browser with this user data dir instead of attaching. |
 | `--no-browser-tools` | Hide `browser_*` tools, e.g. when pi-browser-harness does the exploring. |
 
-webnav opens its own tab and never reads cookies or credentials. When a page looks like a login, it reports `login_suspected` and the agent asks you to sign in. When webnav does something on its own, such as opening a window in a profile or falling back to the default profile because the pinned one would not open, the next tool result lists it under `notices`.
+webnav opens its own tab and never reads cookies or credentials. When a page looks like a login, it reports `login_suspected` and the agent asks you to sign in. Onboarding under `/auth/` alone is not treated as a login. The `Default` profile uses a new tab directly; selecting another profile may open a window and must be explicitly authorized for focus-safe/headless workflows. A failed profile selection stops rather than silently falling back to different logins. Browser actions such as opening a profile window are reported under `notices`.
 
 ### Using it with pi-browser-harness
 
@@ -100,7 +100,7 @@ export async function run({ page, args, call, ui, log }) {
 | `fn_try` | Run unsaved code; `save_as` saves it if the run succeeds |
 | `fn_run` | Run with contracts/postconditions, bounded results, opt-in read cache; `record` for video; `reset` reloads first |
 | `fn_status` / `fn_abort` | See what a long run is doing (URL, latest `log()` lines) / stop it |
-| `fn_check` | Run all `safe` functions, bypassing caches |
+| `fn_check` | Run all or selected `safe` functions with example args, bypassing caches; supports per-function timeouts and cancellation |
 | `artifact_read` | Retrieve private complete JSON results by ID, in bounded character slices |
 | `fn_cache_clear` | Clear opt-in process-local read caches |
 | `fn_diagnostics` | Inspect current state after a failure without replaying side effects |

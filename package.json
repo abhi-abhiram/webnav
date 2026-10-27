@@ -12,7 +12,7 @@
   },
   "scripts": {
     "check": "tsc -p .",
-    "smoke": "node scripts/smoke.ts && node scripts/regression.ts",
+    "smoke": "node scripts/smoke.ts && node scripts/regression.ts && node scripts/server-regression.ts",
     "browser-smoke": "node scripts/browser-smoke.ts"
   },
   "keywords": [

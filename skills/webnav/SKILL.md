@@ -57,7 +57,7 @@ Rules of thumb:
 - Put locators used by more than one function in `ui.ts` (`export const ui = { name: (page, …) => locator }`), so a UI change is fixed once.
 - End every function with a wait that proves it worked (heading, row, toast, URL). A silent wrong success is worse than a failure. Optional `meta.argsSchema`/`resultSchema` validate inputs/results; `verify(ctx, result)` must throw or return false to reject a postcondition and runs before success/save/cache. See `docs/efficient-automation.md` in the webnav repository for the supported schema subset.
 - Small functions that compose with `call` beat one long script. Do not import between site files; use `call` and `ui`. If a script must run many steps and collect failures, stop at the first failed step that later steps depend on (e.g. onboarding), and `log()` each step.
-- `meta.safe: true` only for functions without side effects; `fn_check` runs those to detect drift. Give functions with params `meta.example` args so they are checked too.
+- `meta.safe: true` only for functions without side effects; `fn_check` runs those to detect drift. Give required params `meta.example` args; schemas with only optional params run with `{}`. Select `names` and per-function `timeout_ms`/`action_timeout_ms` for bounded checks. Skips are not coverage. Returned failed-test counts need `verify`/result contracts to fail the check.
 - Use `fn_save` `message` to say why something changed.
 
 ## 5. Repair when the site changed

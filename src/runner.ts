@@ -49,6 +49,9 @@ export type RunResult = {
 };
 export type RunStatus = { site: string; name: string; elapsed_ms: number; url: string; log: string[] };
 
+export type CheckOptions = Pick<RunOptions, "timeoutMs" | "actionTimeoutMs" | "signal" | "onProgress" | "diagnostics"> & { names?: string[] };
+export type CheckResult = Pick<RunResult, "ok" | "ms" | "error" | "at" | "snapshot" | "screenshot" | "artifact"> & { name: string; skipped?: string };
+
 type Current = { site: string; name: string; start: number; page: Page; log: string[]; abort: AbortController };
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-");
@@ -169,6 +172,8 @@ export class Runner {
       const sites = this.sites;
       let ui: Record<string, any> = {};
       let guardedPage = page;
+      // Preserve returned test findings on explicit request even if validation/verify fails.
+      let completed: { value: unknown } | undefined;
       const stack: string[] = [label];
       // Effects of the functions currently running, so a write anywhere beneath a read fails.
       const effects: (string | undefined)[] = [];
@@ -200,6 +205,7 @@ export class Runner {
         let value: unknown, verified: unknown;
         try {
           value = await target.run(ctx);
+          if (stack.length === 1) completed = { value };
           assertSchema(target.meta.resultSchema, value, `${name} result`);
           verified = await target.verify?.(ctx, value);
         } finally { effects.pop(); }
@@ -248,6 +254,9 @@ export class Runner {
           ...(aborted ? { aborted: true } : {}),
           video,
         };
+        if (completed && opts.storeResult && !(error instanceof PolicyError)) {
+          try { failed.artifact = await this.artifacts.save(json(completed.value)); } catch {} // Never replace the original failure.
+        }
         // Never capture DOM/title/screenshots from a policy-denied page.
         let permitted = !(error instanceof PolicyError);
         try { assertUrl(key, policy, page.url()); } catch { permitted = false; }
@@ -326,9 +335,13 @@ export class Runner {
   }
 
   // Health check: runs every function marked meta.safe, with meta.example as arguments.
-  async check(site: string): Promise<{ name: string; ok: boolean; ms: number; error?: string; at?: string; skipped?: string }[]> {
-    const out: { name: string; ok: boolean; ms: number; error?: string; at?: string; skipped?: string }[] = [];
-    for (const name of await this.sites.names(site)) {
+  async check(site: string, opts: CheckOptions = {}): Promise<CheckResult[]> {
+    const out: CheckResult[] = [];
+    const available = await this.sites.names(site);
+    const names = opts.names ? [...new Set(opts.names)] : available;
+    for (const name of names) if (!available.includes(name)) throw new Error(`unknown function ${name}; see site_get`);
+    for (const name of names) {
+      if (opts.signal?.aborted) throw new Error("cancelled by the client");
       let fn: SiteFunction;
       try {
         fn = await this.sites.load(site, name);
@@ -336,14 +349,23 @@ export class Runner {
         out.push({ name, ok: false, ms: 0, error: (error as Error).message });
         continue;
       }
-      if (!fn.meta.safe) continue;
-      if (!fn.meta.example && ((fn.meta.params && Object.keys(fn.meta.params).length) || (Array.isArray(fn.meta.argsSchema?.required) && fn.meta.argsSchema.required.length))) {
+      if (!fn.meta.safe) {
+        if (opts.names) out.push({ name, ok: true, ms: 0, skipped: "not marked meta.safe; never run by fn_check" });
+        continue;
+      }
+      // A schema distinguishes optional arguments from required ones; legacy params cannot.
+      const needsArgs = fn.meta.argsSchema ? Array.isArray(fn.meta.argsSchema.required) && fn.meta.argsSchema.required.length > 0 : Object.keys(fn.meta.params ?? {}).length > 0;
+      if (!fn.meta.example && needsArgs) {
         out.push({ name, ok: true, ms: 0, skipped: "has params but no meta.example" });
         continue;
       }
       try {
-        const r = await this.run(site, name, fn.meta.example ?? {}, { fresh: true });
-        out.push({ name, ok: r.ok, ms: r.ms, ...(r.error ? { error: r.error, at: r.at } : {}) });
+        const r = await this.run(site, name, fn.meta.example ?? {}, { ...opts, fresh: true });
+        out.push({ name, ok: r.ok && !r.output_error, ms: r.ms,
+          ...(r.error || r.output_error ? { error: r.error ?? r.output_error, at: r.at } : {}),
+          ...(r.snapshot ? { snapshot: r.snapshot } : {}), ...(r.screenshot ? { screenshot: r.screenshot } : {}),
+          ...(r.artifact ? { artifact: r.artifact } : {}),
+        });
       } catch (error) { out.push({ name, ok: false, ms: 0, error: (error as Error).message }); }
     }
     return out;

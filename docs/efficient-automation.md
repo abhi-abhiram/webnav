@@ -68,14 +68,18 @@ Contracts use a deliberately **limited JSON Schema subset**, with no coercion or
 - `enum`, `const`; annotation-only `title`, `description`, `$comment`, `examples`, `default`.
 - Unsupported keywords/types, including refs, formats, tuples and composition, are rejected at save/load rather than silently ignored. Use `verify` for complex invariants. Nesting is limited to 40.
 
-`effect` and `safe` are trusted declarations, not inferred from code. A write cannot also be `safe` or cached. A declared read cannot call a declared write. `fn_check` always bypasses caches, skips parameterized functions without examples and reports per-function preflight errors without stopping the whole check.
+`effect` and `safe` are trusted declarations, not inferred from code. A write cannot also be `safe` or cached. A declared read cannot call a declared write. `fn_check` always bypasses caches and never runs unsafe functions. Required arguments need `meta.example`; schemas with only optional arguments run with `{}` (legacy descriptive `params` without schemas still require examples).
+
+For a bounded health gate, use `fn_check {site, names: ["session_probe", "route_smoke"], timeout_ms: 30000, action_timeout_ms: 3000}`. Unknown names fail before any runs. Timeouts apply to each function, not the whole batch; client cancellation stops the batch before another function starts. `diagnostics: "full"` includes failure snapshots/screenshots in each check entry. Output serialization errors fail health checks rather than showing a false green. Per-function preflight errors do not stop unrelated checks.
+
+Returned `{failed: 3}` is still ordinary data, not automatically a failed check: add `verify` or a result contract that rejects failed tests. Skipped entries are not passing coverage. Use `fn_run`/artifacts when full successful check results are needed.
 
 ## Bounded results and private artifacts
 
 `fn_run`/`fn_try` default to **8000 serialized JSON characters** of inline result data, configurable with `max_result_chars` (256–100000). This budget is for the result, not the entire MCP response; metadata and JSON escaping add overhead.
 
 - `result_fields: ["count", "coverage.complete"]` returns only those own-property dot paths, keyed by the path. No expressions or prototype traversal; missing fields are output errors.
-- `store_result: true` stores the complete original result even if its projection fits.
+- `store_result: true` stores the complete original result even if its projection fits. If the top-level function returned serializable findings but its result contract/`verify` fails, a failure `artifact` retains those findings too (without converting the run to success). Thrown runs without a returned result and policy-denied failures do not store findings.
 - Overflow omits `result`, sets `result_omitted`, includes a preview of at most 1000 characters and an `artifact: {id, chars}` referencing the complete JSON (not a silently truncated JSON value).
 - `artifact_read {id, offset?, limit?, find?}` retrieves character slices of the stored JSON, default 8000/max 30000, with a continuation offset. `find` is case-insensitive and searches from `offset`. Chunks are text, not independently valid JSON. An unknown ID or path-like ID fails; no arbitrary filesystem reads.
 

@@ -69,6 +69,7 @@ function compile(input: unknown, depth = 0): z.ZodType {
 }
 
 export function validateContracts(meta: Contracts & { safe?: boolean }): void {
+  if (meta.safe !== undefined && typeof meta.safe !== "boolean") throw new Error("meta.safe must be a boolean");
   if (meta.effect !== undefined && !["read", "write"].includes(meta.effect)) throw new Error("meta.effect must be read or write");
   if (meta.safe && meta.effect === "write") throw new Error("write functions cannot be meta.safe");
   if (meta.cacheTtlMs !== undefined && (meta.effect !== "read" || !Number.isInteger(meta.cacheTtlMs) || meta.cacheTtlMs < 1 || meta.cacheTtlMs > 3_600_000)) throw new Error("meta.cacheTtlMs requires effect: read and must be 1–3600000");

@@ -21,7 +21,10 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 
 try {
   await client.connect(transport);
-  const tools = (await client.listTools()).tools.map(t => t.name);
+  const listed = (await client.listTools()).tools;
+  const tools = listed.map(t => t.name);
+  const checkSchema = listed.find(t => t.name === "fn_check")!.inputSchema;
+  for (const field of ["names", "timeout_ms", "action_timeout_ms", "diagnostics"]) assert.ok(field in checkSchema.properties!, field);
   for (const t of ["browser_open", "browser_act", "site_get", "fn_save", "fn_run", "fn_try", "fn_status", "fn_abort", "site_set_policy", "artifact_read", "fn_cache_clear", "fn_diagnostics"]) assert.ok(tools.includes(t), t);
 
   assert.equal((await call("fn_status")).text, "idle");
@@ -51,6 +54,9 @@ export async function run({ call }) { return call("goToSettings"); }`;
   const info = JSON.parse((await call("site_get", { site })).text);
   assert.equal(info.site, "localhost_3000");
   assert.equal(info.functions[0].name, "goToSettings");
+  assert.ok(!info.ui.includes("./helpers.ts"), "new sites must not import a nonexistent helper module");
+  assert.equal((await call("fn_check", { site, names: ["unknown"] })).error, true);
+  assert.equal((await call("fn_check", { site, names: [] })).error, true);
   assert.match(info.notes, /Settings: main nav/);
   assert.match((await call("site_history", { site })).text, /fn\(goToSettings\): add/);
   assert.equal((await call("fn_save", { site, name: "../escape", code: fn })).error, true);
