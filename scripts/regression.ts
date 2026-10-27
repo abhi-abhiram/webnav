@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Artifacts, project } from "../src/artifacts.ts";
 import { assertSchema, canonical } from "../src/contracts.ts";
-import { assertUrl, policySchema, withPolicy } from "../src/policy.ts";
+import { assertUrl, policySchema, withPolicy, PolicyError } from "../src/policy.ts";
 import { Sites } from "../src/sites.ts";
 import { Runner } from "../src/runner.ts";
-import { loginSuspected, validateEndpoint, type BrowserManager } from "../src/browser.ts";
+import { loginSuspected, validateEndpoint, BrowserManager } from "../src/browser.ts";
 import type { Page } from "playwright-core";
 
 const root = await mkdtemp(join(tmpdir(), "webnav-regression-"));
@@ -66,6 +66,13 @@ try {
   assert.deepEqual(selected.result, {count: 1});
   assert.deepEqual(JSON.parse((await artifacts.read(selected.artifact!.id, 0, 30000)).text!), large);
 
+  const latchedBrowser = new BrowserManager({ cdpEndpoint: "http://127.0.0.1:1", lockPath: join(root, "profile.lock") });
+  const profileFailure = new Error("profile open failed; reconnect explicitly");
+  (latchedBrowser as any).profileOpenFailed = profileFailure;
+  for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(latchedBrowser.use(async () => { throw new Error("must not connect"); }), error => error === profileFailure);
+  await latchedBrowser.close();
+  assert.equal((latchedBrowser as any).profileOpenFailed, undefined, "explicit reconnect/close clears the profile-failure latch");
+
   const original = `export const meta={description:"Count reads",effect:"read",cacheTtlMs:10000,argsSchema:{type:"object",properties:{value:{type:"integer"}},required:["value"],additionalProperties:false},resultSchema:{type:"object",properties:{calls:{type:"integer"}},required:["calls"]}};
 let calls=0; export async function run({args}){return {calls:++calls,value:args.value};}`;
   await sites.save(site, "counter", original);
@@ -106,14 +113,14 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
   assertUrl(site, policy, "https://example.test/work/public?sort=1");
   for (const blocked of ["https://example.test/discussions", "https://example.test/work/private", "https://other.test/work/public"]) assert.throws(() => assertUrl(site, policy, blocked));
   // Simulate intercepted HTTP navigation to verify redirect/retry options without Chrome.
-  let handler: any, location: string | undefined, fetched=0, disposed=0, navigationUrl="about:blank";
+  let handler: any, location: string | undefined, fetched=0, disposed=0, navigationUrl="about:blank", transportFailure=false;
   const frame={};
   const routedPage:any={...page,url:()=>navigationUrl,mainFrame:()=>frame,
     route:async (_pattern:any,cb:any)=>{handler=cb;},unroute:async()=>{handler=undefined;},
     goto:async (target:string)=>{
       let aborted=false;
       await handler({request:()=>({isNavigationRequest:()=>true,frame:()=>frame,url:()=>target}),
-        fetch:async (options:any)=>{fetched++;assert.deepEqual(options,{maxRedirects:0,maxRetries:0});return {status:()=>location?302:200,headers:()=>location?{location}:{},dispose:async()=>{disposed++;}};},
+        fetch:async (options:any)=>{fetched++;assert.deepEqual(options,{maxRedirects:0,maxRetries:0});if(transportFailure)throw new Error("connection reset");return {status:()=>location?302:200,headers:()=>location?{location}:{},dispose:async()=>{disposed++;}};},
         fulfill:async()=>{},abort:async()=>{aborted=true;},fallback:async()=>{throw new Error("navigation must not bypass routing");}});
       if(aborted)throw new Error("transport blocked");navigationUrl=target;
     }};
@@ -123,6 +130,12 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
   location="/work/public";
   await assert.rejects(withPolicy(routedPage,site,policy,async guarded=>{await guarded.goto("https://example.test/work/redirect");}),/HTTP redirects/);
   assert.equal(fetched,3);assert.equal(disposed,3,"HTTP responses are released after fulfill or denial");
+  transportFailure=true;
+  await withPolicy(routedPage,site,policy,async guarded=>{
+    await assert.rejects(guarded.goto("https://example.test/work/public"), error => !(error instanceof PolicyError));
+    assert.equal(await guarded.title(),"Synthetic","transport errors do not poison later allowed diagnostics");
+  });
+  transportFailure=false;
   await sites.writePolicy(site, policy);
   await sites.save(site,"writer",`export const meta={description:"Write",effect:"write"};export async function run(){return "done";}`);
   const priorUses=uses;
@@ -163,6 +176,22 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
   const beforeUnknown=uses;
   await assert.rejects(runner.check(site,{names:["optionalCheck","unknown"]}),/unknown function/);
   assert.equal(uses,beforeUnknown,"validate all selected names before any function runs");
+  for (const draft of [false, true]) {
+    let queued!: () => void, release!: () => void;
+    const waiting = new Promise<void>(resolve => { queued = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const delayedBrowser = { use: async (fn: any) => { queued(); await gate; return fn(page); } } as unknown as BrowserManager;
+    const queuedRunner = new Runner(sites, delayedBrowser, join(root, "data"));
+    const queuedCancellation = new AbortController();
+    const beforeQueue = url;
+    const code = `export const meta={description:"Cancelled queued writer",effect:"write"};export async function run({page}){await page.goto("https://example.test/unexpected-write");}`;
+    await sites.save(site,"queuedWriter",code);
+    const promise = draft ? queuedRunner.try(site, code, {}, {signal:queuedCancellation.signal}) : queuedRunner.run(site,"queuedWriter",{}, {signal:queuedCancellation.signal});
+    await waiting;
+    queuedCancellation.abort(); release();
+    await assert.rejects(promise,/cancelled/);
+    assert.equal(url,beforeQueue,"cancelled queued runs/drafts must not execute");
+  }
   const inFlight = new AbortController();
   const beforeBatchCancel = uses;
   const cancelTimer = setTimeout(() => inFlight.abort(), 30);

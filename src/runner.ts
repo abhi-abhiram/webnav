@@ -160,6 +160,8 @@ export class Runner {
     const roots = [this.sites.dir(key), join(this.dataDir, "tmp")].flatMap(p => [p, pathToFileURL(p).href]);
     const writes = fn.meta.effect !== "read";
     return this.browser.use(async (page: Page) => {
+      // The client may have cancelled while this run waited for the browser lock.
+      if (opts.signal?.aborted) throw new Error("cancelled by the client");
       // Invalidate inside the lock too: reads that held it before this write may have cached since.
       if (writes) this.clearCache(key);
       const start = Date.now();

@@ -75,11 +75,16 @@ const runFlags = {
 export function createServer({ browser, sites, runner, dataDir, browserTools }: Deps): McpServer {
   const server = new McpServer({ name: "webnav", version });
   const artifacts = new Artifacts(dataDir);
-  const scopedUse = <T>(target: string | undefined, fn: (page: Page) => Promise<T>) => browser.use(async page => {
+  const scopedUse = <T>(signal: AbortSignal, target: string | undefined, fn: (page: Page) => Promise<T>) => browser.use(async page => {
+    const run = async (scoped: Page) => {
+      if (signal.aborted) throw new Error("cancelled by the client");
+      return fn(scoped);
+    };
+    if (signal.aborted) throw new Error("cancelled by the client");
     const url = target ?? page.url();
-    if (url === "about:blank") return fn(page);
+    if (url === "about:blank") return run(page);
     const key = siteKey(url);
-    return withPolicy(page, key, await sites.policy(key), fn);
+    return withPolicy(page, key, await sites.policy(key), run);
   });
   const safe = guarded(() => browser.takeNotices());
   const read = { readOnlyHint: true, openWorldHint: false };
@@ -96,12 +101,13 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
           .describe("Switch this session to the browser at this local http:// or ws:// CDP endpoint, e.g. http://127.0.0.1:9222"),
       },
       annotations: live,
-    }, safe(async a => {
+    }, safe(async (a, extra: Extra) => {
+      if (extra.signal.aborted) throw new Error("cancelled by the client");
       if (a.cdp_endpoint) { await browser.attachTo(a.cdp_endpoint); runner.clearCache(); }
       const navigates = !!(a.url || a.history);
       if (navigates) runner.clearCache();
       try {
-        return await scopedUse(a.url, async page => {
+        return await scopedUse(extra.signal, a.url, async page => {
           if (a.url) await page.goto(a.url);
           else if (a.history === "back") await page.goBack();
           else if (a.history === "forward") await page.goForward();
@@ -123,7 +129,7 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
         max_chars: z.number().int().min(1000).max(100_000).optional(),
       },
       annotations: read,
-    }, safe(async a => scopedUse(undefined, async page =>
+    }, safe(async (a, extra: Extra) => scopedUse(extra.signal, undefined, async page =>
       text(await pageState(page), await snapshot(page, { within: a.within, depth: a.depth, maxChars: a.max_chars })))));
 
     server.registerTool("browser_act", {
@@ -140,7 +146,7 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
           .describe("What to return afterwards: changes since the last snapshot (default), the full tree, or nothing"),
       },
       annotations: live,
-    }, safe(async a => scopedUse(undefined, async page => {
+    }, safe(async (a, extra: Extra) => scopedUse(extra.signal, undefined, async page => {
       const policy = page.url() === "about:blank" ? null : await sites.policy(siteKey(page.url()));
       if (policy?.require_write_approval && !a.approved) throw new Error("site policy requires approved: true for browser interactions");
       // Any interaction may change what cached reads return, even one that throws partway.
@@ -155,7 +161,7 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
       description: "Screenshot of the current page. Prefer snapshots for finding elements; use this to check how something looks.",
       inputSchema: { full_page: z.boolean().optional() },
       annotations: read,
-    }, safe(async a => scopedUse(undefined, async page => {
+    }, safe(async (a, extra: Extra) => scopedUse(extra.signal, undefined, async page => {
       await mkdir(join(dataDir, "screenshots"), { recursive: true, mode: 0o700 });
       const path = join(dataDir, "screenshots", `shot-${Date.now()}.png`);
       await page.screenshot({ path, fullPage: a.full_page });
@@ -248,7 +254,12 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
       maxResultChars: a.max_result_chars, resultFields: a.result_fields, storeResult: a.store_result, ...runControls(extra),
     });
     if (!result.ok || result.output_error || !a.save_as) return text(result);
-    return text({ ...result, saved: await sites.save(a.site, a.save_as, a.code, a.message) });
+    try {
+      return text({ ...result, saved: await sites.save(a.site, a.save_as, a.code, a.message) });
+    } catch (error) {
+      return text({ ...result, save_error: (error as Error).message ?? String(error),
+        retry_warning: "Function already completed; only saving failed. Do not rerun to recover output." });
+    }
   }));
 
   server.registerTool("fn_run", {

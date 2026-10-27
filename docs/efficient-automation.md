@@ -85,7 +85,7 @@ Returned `{failed: 3}` is still ordinary data, not automatically a failed check:
 
 Artifacts live outside git in `<data-dir>/artifacts/<uuid>.json`; newly created directories/files use `0700`/`0600`. Each artifact is limited to 10 million characters. There is no automatic retention/deletion yet; operators should remove expired artifacts when appropriate. Existing filesystem permissions are not rewritten.
 
-Serialization/projection/storage failure after a successful function returns `ok: true`, `result_omitted` and `output_error`: the function **already completed**. If the original value can still be serialized/stored (e.g. a bad projection), an artifact reference preserves it for recovery. It must not be rerun just to recover output, particularly for writes. Drafts with output errors are not saved by `save_as`.
+Serialization/projection/storage failure after a successful function returns `ok: true`, `result_omitted` and `output_error`: the function **already completed**. If the original value can still be serialized/stored (e.g. a bad projection), an artifact reference preserves it for recovery. It must not be rerun just to recover output, particularly for writes. Drafts with output errors are not saved by `save_as`. If execution succeeds but `save_as` fails (validation/git/filesystem), output/state/artifact references survive with `save_error` and a no-retry warning. Only persistence failed; do not replay a completed write.
 
 ## Compact diagnostics without replay
 
