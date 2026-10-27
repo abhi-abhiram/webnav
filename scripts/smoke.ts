@@ -25,6 +25,7 @@ try {
   const tools = listed.map(t => t.name);
   const checkSchema = listed.find(t => t.name === "fn_check")!.inputSchema;
   for (const field of ["names", "timeout_ms", "action_timeout_ms", "diagnostics"]) assert.ok(field in checkSchema.properties!, field);
+  assert.match((checkSchema.properties!.timeout_ms as {description:string}).description,/each checked function/);
   for (const t of ["browser_open", "browser_act", "site_get", "fn_save", "fn_run", "fn_try", "fn_status", "fn_abort", "site_set_policy", "artifact_read", "fn_cache_clear", "fn_diagnostics"]) assert.ok(tools.includes(t), t);
 
   assert.equal((await call("fn_status")).text, "idle");
@@ -57,6 +58,11 @@ export async function run({ call }) { return call("goToSettings"); }`;
   assert.ok(!info.ui.includes("./helpers.ts"), "new sites must not import a nonexistent helper module");
   assert.equal((await call("fn_check", { site, names: ["unknown"] })).error, true);
   assert.equal((await call("fn_check", { site, names: [] })).error, true);
+  const unsafeSkip = JSON.parse((await call("fn_check", { site, names: ["viaCall"] })).text)[0];
+  assert.equal(unsafeSkip.ok,false);assert.match(unsafeSkip.skipped,/not marked/);
+  await call("fn_save", {site,name:"requiredInput",code:`export const meta={description:"Needs input",safe:true,argsSchema:{type:"object",properties:{id:{type:"string"}},required:["id"]}};export async function run(){throw new Error("must not execute");}`});
+  const requiredSkip = JSON.parse((await call("fn_check", {site,names:["requiredInput"]})).text)[0];
+  assert.equal(requiredSkip.ok,false);assert.match(requiredSkip.skipped,/no meta.example/);
   assert.match(info.notes, /Settings: main nav/);
   assert.match((await call("site_history", { site })).text, /fn\(goToSettings\): add/);
   assert.equal((await call("fn_save", { site, name: "../escape", code: fn })).error, true);

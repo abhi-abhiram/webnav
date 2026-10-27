@@ -290,11 +290,11 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
   }));
 
   server.registerTool("fn_check", {
-    description: "Run safe functions with example arguments to detect drift, bypassing caches. Optionally select names and per-function timeouts. Unsafe functions never run; use result contracts/verify to make returned test failures fail the check.",
+    description: "Run safe functions with example arguments to detect drift, bypassing caches. Optionally select names and per-function timeouts. Unsafe functions never run; skipped entries have ok=false and a skipped reason. Use result contracts/verify to make returned test failures fail the check.",
     inputSchema: {
       site,
       names: z.array(z.string().min(1)).min(1).max(100).optional().describe("Check only these functions; unknown names fail before any runs"),
-      timeout_ms: runFlags.timeout_ms,
+      timeout_ms: runFlags.timeout_ms.describe("Limit for each checked function (default 60000), not the whole batch; timeout closes that function's tab"),
       action_timeout_ms: runFlags.action_timeout_ms,
       diagnostics: runFlags.diagnostics,
     },

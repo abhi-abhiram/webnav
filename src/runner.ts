@@ -338,6 +338,8 @@ export class Runner {
 
   // Health check: runs every function marked meta.safe, with meta.example as arguments.
   async check(site: string, opts: CheckOptions = {}): Promise<CheckResult[]> {
+    if (opts.signal?.aborted) throw new Error("cancelled by the client");
+    if (opts.names && !opts.names.length) throw new Error("names must not be empty; omit names to check all safe functions");
     const out: CheckResult[] = [];
     const available = await this.sites.names(site);
     const names = opts.names ? [...new Set(opts.names)] : available;
@@ -352,13 +354,13 @@ export class Runner {
         continue;
       }
       if (!fn.meta.safe) {
-        if (opts.names) out.push({ name, ok: true, ms: 0, skipped: "not marked meta.safe; never run by fn_check" });
+        if (opts.names) out.push({ name, ok: false, ms: 0, skipped: "not marked meta.safe; never run by fn_check" });
         continue;
       }
       // A schema distinguishes optional arguments from required ones; legacy params cannot.
       const needsArgs = fn.meta.argsSchema ? Array.isArray(fn.meta.argsSchema.required) && fn.meta.argsSchema.required.length > 0 : Object.keys(fn.meta.params ?? {}).length > 0;
       if (!fn.meta.example && needsArgs) {
-        out.push({ name, ok: true, ms: 0, skipped: "has params but no meta.example" });
+        out.push({ name, ok: false, ms: 0, skipped: "has params but no meta.example" });
         continue;
       }
       try {
@@ -368,8 +370,12 @@ export class Runner {
           ...(r.snapshot ? { snapshot: r.snapshot } : {}), ...(r.screenshot ? { screenshot: r.screenshot } : {}),
           ...(r.artifact ? { artifact: r.artifact } : {}),
         });
-      } catch (error) { out.push({ name, ok: false, ms: 0, error: (error as Error).message }); }
+      } catch (error) {
+        if (opts.signal?.aborted) throw new Error("cancelled by the client");
+        out.push({ name, ok: false, ms: 0, error: (error as Error).message });
+      }
     }
+    if (opts.signal?.aborted) throw new Error("cancelled by the client");
     return out;
   }
 }

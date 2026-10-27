@@ -83,7 +83,9 @@ export async function run({ page, args, call, ui, log }) {
 }
 ```
 
-`page` is a Playwright `Page`. `call(name, args)` runs another function of the same site, and `ui` is the object exported by `ui.ts`. Helpers: `open(path)` goes to that page of the site unless already there; `ensureOnSite(path)` only navigates when the tab is on another site (for steps that work from any page); `pick(trigger, options)` chooses options in a listbox dropdown and closes it even when it stays open after a pick; `items(locator, role?)` returns accessible elements as `{ role, name, url, selected, … }` objects for retrieval functions, and `escape(text)` escapes text for regex names. `meta.safe` marks functions without side effects, which `fn_check` runs as a health check (with `meta.example` args when they take params).
+`page` is a Playwright `Page`. `call(name, args)` runs another function of the same site, and `ui` is the object exported by `ui.ts`. Helpers: `open(path)` goes to that page of the site unless already there; `ensureOnSite(path)` only navigates when the tab is on another site (for steps that work from any page); `pick(trigger, options)` chooses options in a listbox dropdown and closes it even when it stays open after a pick; `items(locator, role?)` returns accessible elements as `{ role, name, url, selected, … }` objects for retrieval functions, and `escape(text)` escapes text for regex names. `meta.safe` marks functions without side effects, which `fn_check` runs as a health check (with `meta.example` args when required). Skipped checks report `ok: false` with a `skipped` reason, not passing coverage.
+
+`pick` follows the trigger's `aria-controls` when supplied; otherwise exactly one visible listbox is required. Multiple visible listboxes or matching options fail instead of silently picking the last/first. Cleanup best-effort closes the original trigger without changing unrelated open dropdowns.
 
 ## Tools
 

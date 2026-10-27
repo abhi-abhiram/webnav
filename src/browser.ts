@@ -191,7 +191,7 @@ async function openProfileTab(context: BrowserContext, executable: string, userD
 export async function loginSuspected(page: Page): Promise<boolean> {
   const path = new URL(page.url()).pathname;
   // /auth is sometimes a login entry, but /auth/create-organization is onboarding.
-  if (/(^|\/)(login|log-in|signin|sign-in|sso|otp)(\/|$)/i.test(path) || /^\/auth\/?$/i.test(path)) return true;
+  if (/(^|\/)(login|log-in|signin|sign-in|sso|otp|verify-email)(\/|$)/i.test(path) || /^\/auth\/?$/i.test(path)) return true;
   return (await page.locator("input[type=password]:visible").count().catch(() => 0)) > 0;
 }
 

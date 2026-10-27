@@ -29,7 +29,7 @@ const runner = new Runner(sites, browser, join(root, "data"));
 const artifacts = new Artifacts(join(root, "data"));
 const site = "example.test";
 try {
-  for (const path of ["/login", "/auth/login", "/auth/otp", "/auth", "/sign-in"]) {
+  for (const path of ["/login", "/auth/login", "/auth/otp", "/auth", "/sign-in", "/verify-email"]) {
     url = `https://${site}${path}`;
     assert.equal(await loginSuspected(page), true, path);
   }
@@ -114,13 +114,14 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
   for (const blocked of ["https://example.test/discussions", "https://example.test/work/private", "https://other.test/work/public"]) assert.throws(() => assertUrl(site, policy, blocked));
   // Simulate intercepted HTTP navigation to verify redirect/retry options without Chrome.
   let handler: any, location: string | undefined, fetched=0, disposed=0, navigationUrl="about:blank", transportFailure=false;
+  const connectionReset = new Error("connection reset", { cause: new Error("socket closed") });
   const frame={};
   const routedPage:any={...page,url:()=>navigationUrl,mainFrame:()=>frame,
     route:async (_pattern:any,cb:any)=>{handler=cb;},unroute:async()=>{handler=undefined;},
     goto:async (target:string)=>{
       let aborted=false;
       await handler({request:()=>({isNavigationRequest:()=>true,frame:()=>frame,url:()=>target}),
-        fetch:async (options:any)=>{fetched++;assert.deepEqual(options,{maxRedirects:0,maxRetries:0});if(transportFailure)throw new Error("connection reset");return {status:()=>location?302:200,headers:()=>location?{location}:{},dispose:async()=>{disposed++;}};},
+        fetch:async (options:any)=>{fetched++;assert.deepEqual(options,{maxRedirects:0,maxRetries:0});if(transportFailure)throw connectionReset;return {status:()=>location?302:200,headers:()=>location?{location}:{},dispose:async()=>{disposed++;}};},
         fulfill:async()=>{},abort:async()=>{aborted=true;},fallback:async()=>{throw new Error("navigation must not bypass routing");}});
       if(aborted)throw new Error("transport blocked");navigationUrl=target;
     }};
@@ -131,12 +132,22 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
   await assert.rejects(withPolicy(routedPage,site,policy,async guarded=>{await guarded.goto("https://example.test/work/redirect");}),/HTTP redirects/);
   assert.equal(fetched,3);assert.equal(disposed,3,"HTTP responses are released after fulfill or denial");
   transportFailure=true;
+  await assert.rejects(withPolicy(routedPage,site,policy,async guarded=>{
+    await guarded.goto("https://example.test/work/public");
+  }), error => error === connectionReset, "uncaught transport failures retain the original error and cause");
   await withPolicy(routedPage,site,policy,async guarded=>{
-    await assert.rejects(guarded.goto("https://example.test/work/public"), error => !(error instanceof PolicyError));
-    assert.equal(await guarded.title(),"Synthetic","transport errors do not poison later allowed diagnostics");
+    await assert.rejects(guarded.goto("https://example.test/work/public"), error => error === connectionReset && !(error instanceof PolicyError));
+    assert.equal(await guarded.title(),"Synthetic","caught transport errors do not poison later allowed diagnostics");
+    transportFailure=false;location=undefined;
+    await guarded.goto("https://example.test/work/public");
   });
-  transportFailure=false;
   await sites.writePolicy(site, policy);
+  transportFailure=true;
+  const scopedRunner = new Runner(sites, { use: async (fn: any) => fn(routedPage) } as unknown as BrowserManager, join(root,"data"));
+  const transportResult = await scopedRunner.try(site, `export const meta={description:"Scoped transport failure",safe:true,effect:"read"};export async function run({page}){await page.goto("https://example.test/work/public");}`, {}, {diagnostics:"full"});
+  assert.equal(transportResult.ok,false);assert.match(transportResult.error!,/connection reset/);
+  assert.equal(transportResult.state!.title,"Synthetic");assert.ok(transportResult.snapshot,"transport failures retain allowed-page diagnostics");
+  transportFailure=false;
   await sites.save(site,"writer",`export const meta={description:"Write",effect:"write"};export async function run(){return "done";}`);
   const priorUses=uses;
   await assert.rejects(runner.run(site,"writer"), /approved/);
@@ -171,12 +182,15 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
   assert.equal(focused.length,5);
   assert.equal(focused[0]!.ok,true);assert.equal(focused[0]!.skipped,undefined,"schema optional params should run");
   assert.match(focused[1]!.skipped!,/params/);assert.match(focused[2]!.skipped!,/not marked/);
+  assert.equal(focused[1]!.ok,false,"missing examples are not passing coverage");
+  assert.equal(focused[2]!.ok,false,"selected unsafe functions are not passing coverage");
   assert.equal(focused[3]!.ok,false,"output errors cannot pass a health check");
   assert.equal(focused[4]!.ok,false);assert.match(focused[4]!.error!,/timed out/);
   const beforeUnknown=uses;
+  await assert.rejects(runner.check(site,{names:[]}),/must not be empty/);
   await assert.rejects(runner.check(site,{names:["optionalCheck","unknown"]}),/unknown function/);
   assert.equal(uses,beforeUnknown,"validate all selected names before any function runs");
-  for (const draft of [false, true]) {
+  for (const kind of ["run", "try", "check"]) {
     let queued!: () => void, release!: () => void;
     const waiting = new Promise<void>(resolve => { queued = resolve; });
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -184,21 +198,25 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
     const queuedRunner = new Runner(sites, delayedBrowser, join(root, "data"));
     const queuedCancellation = new AbortController();
     const beforeQueue = url;
-    const code = `export const meta={description:"Cancelled queued writer",effect:"write"};export async function run({page}){await page.goto("https://example.test/unexpected-write");}`;
+    const code = `export const meta={description:"Cancelled queued function",effect:"${kind === "check" ? "read" : "write"}"${kind === "check" ? ",safe:true" : ""}};export async function run({page}){await page.goto("https://example.test/unexpected-action");}`;
     await sites.save(site,"queuedWriter",code);
-    const promise = draft ? queuedRunner.try(site, code, {}, {signal:queuedCancellation.signal}) : queuedRunner.run(site,"queuedWriter",{}, {signal:queuedCancellation.signal});
+    const promise = kind === "try" ? queuedRunner.try(site, code, {}, {signal:queuedCancellation.signal})
+      : kind === "check" ? queuedRunner.check(site, {names:["queuedWriter"],signal:queuedCancellation.signal})
+      : queuedRunner.run(site,"queuedWriter",{}, {signal:queuedCancellation.signal});
     await waiting;
     queuedCancellation.abort(); release();
     await assert.rejects(promise,/cancelled/);
-    assert.equal(url,beforeQueue,"cancelled queued runs/drafts must not execute");
+    assert.equal(url,beforeQueue,"cancelled queued runs/drafts/last checks must not execute");
   }
-  const inFlight = new AbortController();
-  const beforeBatchCancel = uses;
-  const cancelTimer = setTimeout(() => inFlight.abort(), 30);
-  try {
-    await assert.rejects(runner.check(site, { names: ["timeoutCheck", "optionalCheck"], signal: inFlight.signal, timeoutMs: 1000 }), /cancelled/);
-    assert.equal(uses, beforeBatchCancel + 1, "cancelled batches cannot start the next function");
-  } finally { clearTimeout(cancelTimer); }
+  for (const names of [["timeoutCheck", "optionalCheck"], ["timeoutCheck"]]) {
+    const inFlight = new AbortController();
+    const beforeBatchCancel = uses;
+    const cancelTimer = setTimeout(() => inFlight.abort(), 30);
+    try {
+      await assert.rejects(runner.check(site, { names, signal: inFlight.signal, timeoutMs: 1000 }), /cancelled/);
+      assert.equal(uses, beforeBatchCancel + 1, "cancelled batches stop and reject, including the last selected function");
+    } finally { clearTimeout(cancelTimer); }
+  }
   const controller=new AbortController();controller.abort();
   await assert.rejects(runner.check(site,{signal:controller.signal}),/cancelled/);
   const priorCancelled=uses;
