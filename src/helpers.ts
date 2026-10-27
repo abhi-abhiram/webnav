@@ -86,7 +86,11 @@ export async function pick(trigger: Locator, options: string | RegExp | (string 
     await listbox.waitFor({ state: "hidden" });
   } finally {
     // Preserve the original error while leaving the shared tab ready for another run.
-    if (listbox && await listbox.isVisible().catch(() => false)) await button.click({ timeout: 1_000 }).catch(() => {});
+    const visible = listbox ? await listbox.isVisible().catch(() => undefined) : undefined;
+    const expanded = await button.getAttribute("aria-expanded").catch(() => null);
+    // Visibility wins over stale ARIA state after an option auto-closes its popup.
+    // Only fall back to the original trigger's state when visibility is ambiguous.
+    if (visible === true || (visible === undefined && expanded === "true")) await button.click({ timeout: 1_000 }).catch(() => {});
     await button.dispose().catch(() => {});
   }
 }

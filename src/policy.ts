@@ -37,6 +37,14 @@ export async function withPolicy<T>(page: Page, site: string, policy: SitePolicy
   if (!policy) return fn(page);
   const checked = () => assertUrl(site, policy, page.url());
   let blocked: PolicyError | undefined;
+  let transportFailure: Error | undefined;
+  const operationError = (fallback: unknown): unknown => {
+    const failure = blocked ?? transportFailure ?? fallback;
+    // Unlike policy denials, an ordinary transport failure is consumed once. A caller
+    // may catch it and inspect the allowed page or explicitly retry within the same scope.
+    transportFailure = undefined;
+    return failure;
+  };
   const route = async (r: Route) => {
     if (r.request().isNavigationRequest() && r.request().frame() === page.mainFrame()) {
       try {
@@ -57,6 +65,7 @@ export async function withPolicy<T>(page: Page, site: string, policy: SitePolicy
         // Only an actual scope denial poisons later operations. Transport failures on
         // allowed URLs must remain ordinary navigation errors, with diagnostics available.
         if (e instanceof PolicyError) blocked = e;
+        else transportFailure = e instanceof Error ? e : new Error(String(e));
         await r.abort("blockedbyclient").catch(() => {});
         return;
       }
@@ -77,20 +86,20 @@ export async function withPolicy<T>(page: Page, site: string, policy: SitePolicy
         else if (!["url", "isClosed", "setDefaultTimeout", "on", "off", "once"].includes(String(key))) checked();
         const result = value.apply(object, args);
         const wrapped = (v: any) => {
-          if (blocked) throw blocked;
+          if (blocked || transportFailure) throw operationError(undefined);
           if (!["url", "isClosed", "setDefaultTimeout", "on", "off", "once"].includes(String(key))) checked();
           if (Array.isArray(v)) return v.map(item => item && typeof item.locator === "function" ? wrap(item) : item);
           if (v === page) return wrap(page);
           if (v && typeof v === "object" && typeof v.locator === "function" && (typeof v.count === "function" || typeof v.getByRole === "function")) return wrap(v as Locator);
           return v;
         };
-        return result?.then ? result.then(wrapped) : wrapped(result);
+        return result?.then ? result.then(wrapped, (error: unknown) => { throw operationError(error); }) : wrapped(result);
       };
     }});
     proxies.set(target, proxy);
     return proxy;
   };
-  try { const result = await fn(wrap(page)); if (blocked) throw blocked; checked(); return result; }
-  catch (error) { throw blocked ?? error; }
+  try { const result = await fn(wrap(page)); if (blocked || transportFailure) throw operationError(undefined); checked(); return result; }
+  catch (error) { throw operationError(error); }
   finally { await page.unroute("**/*", route).catch(() => {}); }
 }
