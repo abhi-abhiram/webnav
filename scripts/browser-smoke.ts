@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { BrowserManager } from "../src/browser.ts";
 import { defaultPaths } from "../src/paths.ts";
 import { policySchema, withPolicy } from "../src/policy.ts";
+import { pick } from "../src/helpers.ts";
 
 const endpoint = process.env.WEBNAV_CDP_ENDPOINT;
 if (!endpoint) throw new Error("Set WEBNAV_CDP_ENDPOINT to the demo browser's local CDP endpoint; this test never launches a browser");
@@ -15,6 +16,14 @@ const fixture = createServer((req, res) => {
   if (req.url === "/blocked") { deniedRequests++; res.end("private fixture"); return; }
   if (req.url === "/redirect") { res.writeHead(302, {Location:"/blocked"}); res.end(); return; }
   res.setHeader("Content-Type","text/html");
+  if (req.url === "/dropdowns") {
+    res.end(`<!doctype html><button aria-controls="choices" aria-expanded="false" onclick="choices.hidden=!choices.hidden;this.setAttribute('aria-expanded',String(!choices.hidden))">Choose</button>
+      <div id="choices" role="listbox" hidden>
+        <button role="option" onclick="document.querySelector('button').textContent=this.textContent">Alpha</button>
+        <button role="option">Duplicate</button><button role="option">Duplicate</button>
+      </div><div role="listbox" hidden><button role="option">Wrong hidden option</button></div>`);
+    return;
+  }
   res.end('<h1>Allowed fixture</h1><a href="/blocked">Blocked link</a><button onclick="history.pushState({},\'\',\'/blocked\')">SPA change</button>');
 });
 await new Promise<void>(resolve=>fixture.listen(0,"127.0.0.1",resolve));
@@ -43,6 +52,15 @@ try {
       await guarded.getByRole("button").click();
       await heading.innerText();
     }),/denied/,"SPA URL changes fail before the next DOM read");
+    await page.goto(`${origin}/dropdowns`);
+    await pick(page.getByRole("button", { name: "Choose", exact: true }), "Alpha");
+    assert.equal(await page.getByRole("listbox").isVisible(), false);
+    assert.equal(await page.getByRole("button", { name: "Alpha", exact: true }).count(), 1, "trigger name changes but the original handle still closes it");
+    await assert.rejects(pick(page.getByRole("button", { name: "Alpha", exact: true }), "Duplicate"), /strict mode violation/, "ambiguous options never silently pick first");
+    await page.goto(`${origin}/dropdowns`);
+    await page.getByRole("button", { name: "Choose", exact: true }).evaluate(el => el.removeAttribute("aria-controls"));
+    await pick(page.getByRole("button", { name: "Choose", exact: true }), "Alpha");
+    assert.equal(await page.locator("#choices").isVisible(), false, "fallback ignores hidden listboxes");
     console.error("browser smoke ok");
   });
 } finally {

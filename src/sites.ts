@@ -73,13 +73,8 @@ const notesTemplate = (site: string) => `# ${site}
 ## Quirks
 `;
 
-const uiTemplate = `import type { Locator, Page } from "playwright-core";
-import type { Item } from "./helpers.ts";
-
-// Shared locators for this site. When the UI changes, fix them here once.
-export const ui = {
-  // mainNav: (page: Page) => page.getByRole("navigation", { name: "Main" }),
-};
+const uiTemplate = `// Shared locators for this site. When the UI changes, fix them here once.
+export const ui = {};
 `;
 
 export class Sites {

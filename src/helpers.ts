@@ -72,17 +72,18 @@ export async function pick(trigger: Locator, options: string | RegExp | (string 
   const page = trigger.page();
   const button = await trigger.elementHandle();
   if (!button) throw new Error(`pick: trigger not found: ${trigger}`);
-  await button.click();
-  const controls = await button.getAttribute("aria-controls");
-  const listbox = controls ? page.locator(`[id="${controls}"]`) : page.getByRole("listbox").filter({ visible: true }).last();
-  await listbox.waitFor();
-  for (const option of [options].flat()) {
-    await listbox.getByRole("option", { name: option, exact: typeof option === "string" }).first().click();
+  try {
+    await button.click();
+    const controls = await button.getAttribute("aria-controls");
+    const listbox = controls ? page.locator(`[id=${JSON.stringify(controls)}]`) : page.getByRole("listbox").filter({ visible: true });
+    await listbox.waitFor();
+    for (const option of [options].flat()) {
+      // Ambiguous labels must fail instead of silently selecting the wrong record.
+      await listbox.getByRole("option", { name: option, exact: typeof option === "string" }).click();
+    }
+    if (await listbox.isVisible()) await button.click();
+    await listbox.waitFor({ state: "hidden" });
+  } finally {
+    await button.dispose();
   }
-  if (await listbox.isVisible()) {
-    if ((await button.getAttribute("aria-expanded").catch(() => null)) === "true") await button.click();
-    else await page.locator('[aria-haspopup][aria-expanded="true"]').first().click();
-  }
-  await listbox.waitFor({ state: "hidden" });
-  await button.dispose();
 }
