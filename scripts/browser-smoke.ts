@@ -57,6 +57,9 @@ try {
     assert.equal(await page.getByRole("listbox").isVisible(), false);
     assert.equal(await page.getByRole("button", { name: "Alpha", exact: true }).count(), 1, "trigger name changes but the original handle still closes it");
     await assert.rejects(pick(page.getByRole("button", { name: "Alpha", exact: true }), "Duplicate"), /strict mode violation/, "ambiguous options never silently pick first");
+    assert.equal(await page.locator("#choices").isVisible(), false, "failed picks clean up their dropdown without hiding the original error");
+    await pick(page.getByRole("button", { name: "Alpha", exact: true }), "Alpha");
+    assert.equal(await page.locator("#choices").isVisible(), false, "the next pick starts from clean UI state");
     await page.goto(`${origin}/dropdowns`);
     await page.getByRole("button", { name: "Choose", exact: true }).evaluate(el => el.removeAttribute("aria-controls"));
     await pick(page.getByRole("button", { name: "Choose", exact: true }), "Alpha");

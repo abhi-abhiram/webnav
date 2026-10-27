@@ -312,6 +312,7 @@ export class BrowserManager {
   private tab: Page | null = null;
   private userDataDir?: string;
   private profile?: string;
+  private profileOpenFailed?: Error;
   private opts: BrowserOptions;
   // Things webnav did on its own that the agent should know about; reported with the next tool result.
   private notices: string[] = [];
@@ -355,6 +356,7 @@ export class BrowserManager {
   }
 
   private async page(): Promise<Page> {
+    if (this.profileOpenFailed) throw this.profileOpenFailed;
     if (this.tab && !this.tab.isClosed()) return this.tab;
     const context = await this.connect();
     if (this.profile && this.profile !== "Default" && !this.opts.launch) {
@@ -365,7 +367,8 @@ export class BrowserManager {
         this.tab = await openProfileTab(context, executable, this.userDataDir, this.profile);
         this.notice(`opened a new browser window in profile "${this.profile}" (${this.userDataDir}) for webnav's tab`);
       } catch (error) {
-        throw new Error(`${(error as Error).message}; refusing to fall back to a different profile`);
+        this.profileOpenFailed = new Error(`${(error as Error).message}; refusing to fall back to a different profile. Reconnect explicitly to retry`);
+        throw this.profileOpenFailed;
       }
     } else {
       this.tab = await context.newPage();
@@ -425,5 +428,6 @@ export class BrowserManager {
     this.tab = null;
     this.context = null;
     this.browser = null;
+    this.profileOpenFailed = undefined;
   }
 }

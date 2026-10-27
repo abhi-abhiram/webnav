@@ -72,10 +72,11 @@ export async function pick(trigger: Locator, options: string | RegExp | (string 
   const page = trigger.page();
   const button = await trigger.elementHandle();
   if (!button) throw new Error(`pick: trigger not found: ${trigger}`);
+  let listbox: Locator | undefined;
   try {
     await button.click();
     const controls = await button.getAttribute("aria-controls");
-    const listbox = controls ? page.locator(`[id=${JSON.stringify(controls)}]`) : page.getByRole("listbox").filter({ visible: true });
+    listbox = controls ? page.locator(`[id=${JSON.stringify(controls)}]`) : page.getByRole("listbox").filter({ visible: true });
     await listbox.waitFor();
     for (const option of [options].flat()) {
       // Ambiguous labels must fail instead of silently selecting the wrong record.
@@ -84,6 +85,8 @@ export async function pick(trigger: Locator, options: string | RegExp | (string 
     if (await listbox.isVisible()) await button.click();
     await listbox.waitFor({ state: "hidden" });
   } finally {
-    await button.dispose();
+    // Preserve the original error while leaving the shared tab ready for another run.
+    if (listbox && await listbox.isVisible().catch(() => false)) await button.click({ timeout: 1_000 }).catch(() => {});
+    await button.dispose().catch(() => {});
   }
 }

@@ -54,7 +54,9 @@ export async function withPolicy<T>(page: Page, site: string, policy: SitePolicy
         } finally { await response.dispose().catch(() => {}); }
         return;
       } catch (e) {
-        blocked = e instanceof PolicyError ? e : new PolicyError("scoped navigation failed before a response could be delivered");
+        // Only an actual scope denial poisons later operations. Transport failures on
+        // allowed URLs must remain ordinary navigation errors, with diagnostics available.
+        if (e instanceof PolicyError) blocked = e;
         await r.abort("blockedbyclient").catch(() => {});
         return;
       }

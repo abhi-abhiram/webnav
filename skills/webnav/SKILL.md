@@ -24,7 +24,7 @@ Each site has notes (what exists, where, how to reach it), a shared `ui.ts` of l
 - `browser_open { url }` → read the snapshot → `browser_act { ref, action }`. Each act returns only what changed (`snapshot: "full"` for everything).
 - On big pages read one part: `browser_snapshot { within: 'role=navigation[name="Main"]', depth: 3 }`.
 - If `login_suspected` is true, ask the user to sign in in their browser. Never type credentials.
-- One browser call at a time: parallel calls queue up and each may find the page changed by the other. Read any `notices` in a result (webnav opened a window, fell back to another profile, or waited for another call).
+- One browser call at a time: parallel calls queue up and each may find the page changed by the other. Read any `notices` in a result (webnav opened a profile window or waited for another call).
 - With pi-browser-harness installed you may explore with its tools instead; webnav still runs the functions.
 - Ask before clearly destructive or outward actions (delete, pay, send, invite, publish) unless the task says to do them.
 
