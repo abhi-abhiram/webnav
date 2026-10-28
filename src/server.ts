@@ -64,7 +64,7 @@ const runFlags = {
   diagnostics: z.enum(["compact", "full"]).optional().describe("Failure diagnostics: compact error/state by default; full opts into DOM snapshot and screenshot capture"),
   max_result_chars: z.number().int().min(256).max(100_000).optional().describe("Inline JSON result budget (default 8000); overflow is stored privately and returned as an artifact reference"),
   result_fields: z.array(z.string().min(1)).max(50).optional().describe("Project own-property dot paths, e.g. count or coverage.complete; no expressions"),
-  store_result: z.boolean().optional().describe("Store the full result as a private artifact even when the inline projection fits"),
+  store_result: z.boolean().optional().describe("Store the full result privately even when it fits inline; retain returned findings when result validation/postconditions fail"),
   timeout_ms: z.number().int().min(1000).max(600_000).optional()
     .describe("Whole-run limit (default 60000). On timeout the function is stopped by closing its tab"),
   action_timeout_ms: z.number().int().min(500).max(120_000).optional()
@@ -75,11 +75,16 @@ const runFlags = {
 export function createServer({ browser, sites, runner, dataDir, browserTools }: Deps): McpServer {
   const server = new McpServer({ name: "webnav", version });
   const artifacts = new Artifacts(dataDir);
-  const scopedUse = <T>(target: string | undefined, fn: (page: Page) => Promise<T>) => browser.use(async page => {
+  const scopedUse = <T>(signal: AbortSignal, target: string | undefined, fn: (page: Page) => Promise<T>) => browser.use(async page => {
+    const run = async (scoped: Page) => {
+      if (signal.aborted) throw new Error("cancelled by the client");
+      return fn(scoped);
+    };
+    if (signal.aborted) throw new Error("cancelled by the client");
     const url = target ?? page.url();
-    if (url === "about:blank") return fn(page);
+    if (url === "about:blank") return run(page);
     const key = siteKey(url);
-    return withPolicy(page, key, await sites.policy(key), fn);
+    return withPolicy(page, key, await sites.policy(key), run);
   });
   const safe = guarded(() => browser.takeNotices());
   const read = { readOnlyHint: true, openWorldHint: false };
@@ -96,16 +101,24 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
           .describe("Switch this session to the browser at this local http:// or ws:// CDP endpoint, e.g. http://127.0.0.1:9222"),
       },
       annotations: live,
-    }, safe(async a => {
+    }, safe(async (a, extra: Extra) => {
+      if (extra.signal.aborted) throw new Error("cancelled by the client");
       if (a.cdp_endpoint) { await browser.attachTo(a.cdp_endpoint); runner.clearCache(); }
-      return scopedUse(a.url, async page => {
-        if (a.url) await page.goto(a.url);
-        else if (a.history === "back") await page.goBack();
-        else if (a.history === "forward") await page.goForward();
-        else if (a.history === "reload") await page.reload();
-        await settle(page);
-        return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
-      });
+      const navigates = !!(a.url || a.history);
+      if (navigates) runner.clearCache();
+      try {
+        return await scopedUse(extra.signal, a.url, async page => {
+          if (a.url) await page.goto(a.url);
+          else if (a.history === "back") await page.goBack();
+          else if (a.history === "forward") await page.goForward();
+          else if (a.history === "reload") await page.reload();
+          await settle(page);
+          return text(await pageState(page), a.snapshot === false ? "" : await snapshot(page));
+        });
+      } finally {
+        // Redirects/reloads can change session state even when navigation fails.
+        if (navigates) runner.clearCache();
+      }
     }));
 
     server.registerTool("browser_snapshot", {
@@ -116,7 +129,7 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
         max_chars: z.number().int().min(1000).max(100_000).optional(),
       },
       annotations: read,
-    }, safe(async a => scopedUse(undefined, async page =>
+    }, safe(async (a, extra: Extra) => scopedUse(extra.signal, undefined, async page =>
       text(await pageState(page), await snapshot(page, { within: a.within, depth: a.depth, maxChars: a.max_chars })))));
 
     server.registerTool("browser_act", {
@@ -133,7 +146,7 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
           .describe("What to return afterwards: changes since the last snapshot (default), the full tree, or nothing"),
       },
       annotations: live,
-    }, safe(async a => scopedUse(undefined, async page => {
+    }, safe(async (a, extra: Extra) => scopedUse(extra.signal, undefined, async page => {
       const policy = page.url() === "about:blank" ? null : await sites.policy(siteKey(page.url()));
       if (policy?.require_write_approval && !a.approved) throw new Error("site policy requires approved: true for browser interactions");
       // Any interaction may change what cached reads return, even one that throws partway.
@@ -148,7 +161,7 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
       description: "Screenshot of the current page. Prefer snapshots for finding elements; use this to check how something looks.",
       inputSchema: { full_page: z.boolean().optional() },
       annotations: read,
-    }, safe(async a => scopedUse(undefined, async page => {
+    }, safe(async (a, extra: Extra) => scopedUse(extra.signal, undefined, async page => {
       await mkdir(join(dataDir, "screenshots"), { recursive: true, mode: 0o700 });
       const path = join(dataDir, "screenshots", `shot-${Date.now()}.png`);
       await page.screenshot({ path, fullPage: a.full_page });
@@ -241,7 +254,12 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
       maxResultChars: a.max_result_chars, resultFields: a.result_fields, storeResult: a.store_result, ...runControls(extra),
     });
     if (!result.ok || result.output_error || !a.save_as) return text(result);
-    return text({ ...result, saved: await sites.save(a.site, a.save_as, a.code, a.message) });
+    try {
+      return text({ ...result, saved: await sites.save(a.site, a.save_as, a.code, a.message) });
+    } catch (error) {
+      return text({ ...result, save_error: (error as Error).message ?? String(error),
+        retry_warning: "Function already completed; only saving failed. Do not rerun to recover output." });
+    }
   }));
 
   server.registerTool("fn_run", {
@@ -272,10 +290,18 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
   }));
 
   server.registerTool("fn_check", {
-    description: "Run every function marked meta.safe (no arguments) to detect site changes early.",
-    inputSchema: { site },
+    description: "Run safe functions with example arguments to detect drift, bypassing caches. Optionally select names and per-function timeouts. Unsafe functions never run; skipped entries have ok=false and a skipped reason. Use result contracts/verify to make returned test failures fail the check.",
+    inputSchema: {
+      site,
+      names: z.array(z.string().min(1)).min(1).max(100).optional().describe("Check only these functions; unknown names fail before any runs"),
+      timeout_ms: runFlags.timeout_ms.describe("Limit for each checked function (default 60000), not the whole batch; timeout closes that function's tab"),
+      action_timeout_ms: runFlags.action_timeout_ms,
+      diagnostics: runFlags.diagnostics,
+    },
     annotations: live,
-  }, safe(async a => text(await runner.check(a.site))));
+  }, safe(async (a, extra: Extra) => text(await runner.check(a.site, {
+    names: a.names, timeoutMs: a.timeout_ms, actionTimeoutMs: a.action_timeout_ms, diagnostics: a.diagnostics, ...runControls(extra),
+  }))));
 
   return server;
 }

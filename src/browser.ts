@@ -87,7 +87,7 @@ async function endpointFromProfile(userDataDir: string): Promise<string | null> 
 
 export function validateEndpoint(endpoint: string): string {
   const u = new URL(endpoint);
-  if (!["http:", "ws:"].includes(u.protocol) || u.username || !["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) {
+  if (!["http:", "ws:"].includes(u.protocol) || u.username || u.password || !["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) {
     throw new Error("CDP endpoint must be a local http:// or ws:// URL");
   }
   return endpoint;
@@ -190,7 +190,8 @@ async function openProfileTab(context: BrowserContext, executable: string, userD
 
 export async function loginSuspected(page: Page): Promise<boolean> {
   const path = new URL(page.url()).pathname;
-  if (/(^|\/)(login|log-in|signin|sign-in|sso|auth)(\/|$)/i.test(path)) return true;
+  // /auth is sometimes a login entry, but /auth/create-organization is onboarding.
+  if (/(^|\/)(login|log-in|signin|sign-in|sso|otp|verify-email)(\/|$)/i.test(path) || /^\/auth\/?$/i.test(path)) return true;
   return (await page.locator("input[type=password]:visible").count().catch(() => 0)) > 0;
 }
 
@@ -311,6 +312,7 @@ export class BrowserManager {
   private tab: Page | null = null;
   private userDataDir?: string;
   private profile?: string;
+  private profileOpenFailed?: Error;
   private opts: BrowserOptions;
   // Things webnav did on its own that the agent should know about; reported with the next tool result.
   private notices: string[] = [];
@@ -332,7 +334,7 @@ export class BrowserManager {
     if (this.opts.launch) {
       log("launching browser with", this.opts.launch.userDataDir);
       this.context = await chromium.launchPersistentContext(this.opts.launch.userDataDir, {
-        headless: false, viewport: null, ...realMedia,
+        headless: true, viewport: null, ...realMedia,
         executablePath: this.opts.launch.executable ?? findExecutable(this.opts.launch.userDataDir),
       });
       this.context.on("close", () => { this.context = null; this.tab = null; });
@@ -354,9 +356,10 @@ export class BrowserManager {
   }
 
   private async page(): Promise<Page> {
+    if (this.profileOpenFailed) throw this.profileOpenFailed;
     if (this.tab && !this.tab.isClosed()) return this.tab;
     const context = await this.connect();
-    if (this.profile && !this.opts.launch) {
+    if (this.profile && this.profile !== "Default" && !this.opts.launch) {
       if (!this.userDataDir) throw new Error("--profile-directory needs --user-data-dir when using --cdp-endpoint");
       const executable = this.opts.executable ?? findExecutable(this.userDataDir);
       if (!executable) throw new Error("browser executable not found; pass --browser-executable");
@@ -364,9 +367,8 @@ export class BrowserManager {
         this.tab = await openProfileTab(context, executable, this.userDataDir, this.profile);
         this.notice(`opened a new browser window in profile "${this.profile}" (${this.userDataDir}) for webnav's tab`);
       } catch (error) {
-        this.notice(`${(error as Error).message}; using the attached browser's default profile instead, which may have different logins`);
-        this.profile = undefined;
-        this.tab = await context.newPage();
+        this.profileOpenFailed = new Error(`${(error as Error).message}; refusing to fall back to a different profile. Reconnect explicitly to retry`);
+        throw this.profileOpenFailed;
       }
     } else {
       this.tab = await context.newPage();
@@ -426,5 +428,6 @@ export class BrowserManager {
     this.tab = null;
     this.context = null;
     this.browser = null;
+    this.profileOpenFailed = undefined;
   }
 }
