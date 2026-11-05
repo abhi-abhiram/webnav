@@ -24,7 +24,10 @@ export async function withFileLock<T>(path: string, timeoutMs: number, fn: () =>
       const pid = Number(await readFile(path, "utf8").catch(() => ""));
       const age = Date.now() - ((await stat(path).catch(() => null))?.mtimeMs ?? Date.now());
       if ((pid && !alive(pid)) || (!pid && age > 60_000)) {
-        await rm(path, { force: true });
+        // Another waiter may have removed the stale lock and taken it since we read it;
+        // only remove the file if it still holds the pid we judged stale.
+        const again = Number(await readFile(path, "utf8").catch(() => ""));
+        if (again === pid) await rm(path, { force: true });
         continue;
       }
       if (Date.now() > deadline) throw new Error(`browser is busy (lock held by pid ${pid || "unknown"})`);
