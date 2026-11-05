@@ -95,6 +95,8 @@ export class Sites {
   }
 
   private async git(site: string, ...args: string[]): Promise<string> {
+    // A missing cwd makes spawn report "git ENOENT", which reads as if git were not installed.
+    if (!existsSync(this.dir(site))) throw new Error(`unknown site ${siteKey(site)}; see site_list`);
     const { stdout } = await exec("git", ["-c", "user.name=webnav", "-c", "user.email=webnav@localhost", ...args], { cwd: this.dir(site) });
     return stdout.trim();
   }
@@ -165,6 +167,8 @@ export class Sites {
   async read(site: string, name: string, revision?: string): Promise<string> {
     const file = this.file(site, name);
     if (!revision) return readFile(file, "utf8");
+    // A leading "-" would be parsed as an option, e.g. --output=<file> makes git show write a file.
+    if (!/^[A-Za-z0-9_][A-Za-z0-9._\/~^@{}-]{0,199}$/.test(revision)) throw new Error(`invalid revision ${JSON.stringify(revision)}`);
     const path = name === "ui" ? "ui.ts" : `functions/${name}.ts`;
     return this.git(site, "show", `${revision}:${path}`);
   }
@@ -215,7 +219,9 @@ export class Sites {
 
   async remove(site: string, name: string, message?: string): Promise<string | null> {
     if (name === "ui") throw new Error("ui.ts cannot be deleted; empty it instead");
-    await rm(this.file(site, name), { force: true });
+    const file = this.file(site, name);
+    if (!existsSync(file)) throw new Error(`unknown function ${name}; see site_get`);
+    await rm(file);
     return this.commit(siteKey(site), `fn(${name}): ${message ?? "remove"}`);
   }
 

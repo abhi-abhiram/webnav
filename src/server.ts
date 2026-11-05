@@ -28,7 +28,7 @@ function guarded(notices: () => string[]) {
     try {
       result = await fn(args, extra);
     } catch (error) {
-      result = { isError: true, content: [{ type: "text", text: (error as Error).message ?? String(error) }] };
+      result = { isError: true, content: [{ type: "text", text: (error as Error)?.message ?? String(error) }] };
     }
     const pending = notices();
     if (pending.length) result.content = [...result.content, { type: "text", text: `notices:\n- ${pending.join("\n- ")}` }];

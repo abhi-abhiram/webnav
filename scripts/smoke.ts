@@ -73,6 +73,9 @@ export async function run({ call }) { return call("goToSettings"); }`;
   assert.match((await call("site_history", {site})).text, /policy: update scope/);
   assert.deepEqual(JSON.parse((await call("fn_cache_clear", {site})).text), {cleared:0});
   assert.equal((await call("artifact_read", {id:"../escape"})).error, true);
+  assert.match((await call("fn_read", {site, name:"goToSettings", revision:"--output=/tmp/webnav-x"})).text, /invalid revision/);
+  assert.match((await call("fn_delete", {site, name:"missing"})).text, /unknown function/);
+  assert.match((await call("site_history", {site:"never-saved.example"})).text, /unknown site/);
   console.error("smoke ok");
 } finally {
   await client.close().catch(() => {});
