@@ -36,12 +36,21 @@ export async function items(scope: Locator, role?: string | RegExp, opts: { dept
   return out;
 }
 
+// URL host → site key: lowercase, with a trailing :port kept as _port. Only the port colon is
+// replaced, so IPv6 literals stay intact: [::1]:3000 → [::1]_3000.
+export function hostKey(host: string): string {
+  return host.toLowerCase().replace(/:(\d+)$/, "_$1");
+}
+
 export const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Loopback and private-network hosts usually serve plain HTTP.
+const plainHttp = /^(localhost|[a-z0-9.-]+\.localhost|127(\.\d{1,3}){3}|10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2}|\[::1\])$/;
 
 // discord.com → https://discord.com, localhost_3000 → http://localhost:3000
 export function siteOrigin(site: string): string {
   const host = site.replace(/_(\d+)$/, ":$1");
-  const local = /^(localhost|127\.|\[::1\])/.test(host);
+  const local = plainHttp.test(site.replace(/_\d+$/, ""));
   return `${local ? "http" : "https"}://${host}`;
 }
 

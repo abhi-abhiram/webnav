@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { Locator, Page } from "playwright-core";
-import type { Item } from "./helpers.ts";
+import { hostKey, type Item } from "./helpers.ts";
 import { validateContracts, type Contracts } from "./contracts.ts";
 import { policySchema, type SitePolicy } from "./policy.ts";
 
@@ -41,8 +41,10 @@ const functionName = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 // A site is the URL host (port kept as _port), e.g. app.example.com or localhost_3000.
 export function siteKey(input: string): string {
   const host = input.includes("://") ? new URL(input).host : input;
-  const key = host.toLowerCase().replace(":", "_");
-  if (!/^[a-z0-9][a-z0-9.-]{0,252}(_\d{1,5})?$/.test(key) || key.includes("..")) throw new Error(`invalid site ${JSON.stringify(input)}`);
+  const key = hostKey(host);
+  const name = /^[a-z0-9][a-z0-9.-]{0,252}(_\d{1,5})?$/.test(key) && !key.includes("..");
+  const ipv6 = /^\[[0-9a-f:.]{2,45}\](_\d{1,5})?$/.test(key);
+  if (!name && !ipv6) throw new Error(`invalid site ${JSON.stringify(input)}`);
   return key;
 }
 

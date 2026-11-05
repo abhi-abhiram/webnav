@@ -46,7 +46,10 @@ export class Artifacts {
     const text = await readFile(join(this.dir, `${id}.json`), "utf8");
     if (find !== undefined) {
       if (!find || find.length > 500) throw new Error("find must contain 1–500 characters");
-      const match = text.toLowerCase().indexOf(find.toLowerCase(), offset);
+      // Search the original text: lowercasing can change its length (e.g. "İ") and shift offsets.
+      const pattern = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+      pattern.lastIndex = offset;
+      const match = pattern.exec(text)?.index ?? -1;
       if (match < 0) return { id, found: false, chars: text.length };
       offset = Math.max(0, match - 200);
     }

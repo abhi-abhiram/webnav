@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Page, Locator, Route } from "playwright-core";
+import { hostKey, siteOrigin } from "./helpers.ts";
 
 const pathPattern = z.string().startsWith("/").max(1000).refine(s => !/[?#]/.test(s), "use pathname patterns without query/hash");
 export const policySchema = z.object({
@@ -19,7 +20,7 @@ function matches(path: string, pattern: string): boolean {
 export function assertUrl(site: string, policy: SitePolicy | null, input: string): void {
   if (!policy || input === "about:blank") return;
   const url = new URL(input);
-  const host = url.host.toLowerCase().replace(":", "_");
+  const host = hostKey(url.host);
   if (host !== site || !["http:", "https:"].includes(url.protocol) || url.username || url.password || policy.denied_paths.some(p => matches(url.pathname, p)) || (policy.allowed_paths && !policy.allowed_paths.some(p => matches(url.pathname, p)))) {
     throw new PolicyError(`site policy denied URL: ${url.origin}${url.pathname}`);
   }
@@ -82,7 +83,7 @@ export async function withPolicy<T>(page: Page, site: string, policy: SitePolicy
       if (typeof value !== "function") return value && ["keyboard", "mouse", "touchscreen"].includes(String(key)) ? wrap(value) : value;
       return (...args: any[]) => {
         if (blocked) throw blocked;
-        if (key === "goto") assertUrl(site, policy, new URL(args[0], page.url() === "about:blank" ? `https://${site.replace(/_(\d+)$/, ":$1")}` : page.url()).href);
+        if (key === "goto") assertUrl(site, policy, new URL(args[0], page.url() === "about:blank" ? siteOrigin(site) : page.url()).href);
         else if (!["url", "isClosed", "setDefaultTimeout", "on", "off", "once"].includes(String(key))) checked();
         const result = value.apply(object, args);
         const wrapped = (v: any) => {
