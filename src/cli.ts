@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { parseArgs } from "node:util";
 import { BrowserManager } from "./browser.ts";
 import { defaultPaths, log } from "./paths.ts";
+import { prune } from "./retention.ts";
 import { Runner } from "./runner.ts";
 import { createServer, version } from "./server.ts";
 import { Sites } from "./sites.ts";
@@ -22,6 +23,8 @@ Attaches to a browser you already run with remote debugging enabled; never start
   --launch-user-data-dir <dir>  opt in: launch a browser with this user data dir instead of attaching
   --config-dir <dir>            notes and functions (default: ~/.config/webnav)
   --data-dir <dir>              runs, screenshots, videos, lock (default: ~/.local/share/webnav)
+  --retention-days <n>          delete artifacts, screenshots and videos older than n days at startup
+                                (default 30; 0 keeps them)
   --no-browser-tools            hide browser_* tools (e.g. when pi-browser-harness does the exploring)
   --version, --help`;
 
@@ -34,6 +37,7 @@ const { values } = parseArgs({
     "launch-user-data-dir": { type: "string" },
     "config-dir": { type: "string" },
     "data-dir": { type: "string" },
+    "retention-days": { type: "string" },
     "no-browser-tools": { type: "boolean" },
     version: { type: "boolean" },
     help: { type: "boolean" },
@@ -56,10 +60,17 @@ for (const flag of ["user-data-dir", "launch-user-data-dir", "config-dir", "data
   }
 }
 
+const retentionDays = Number(values["retention-days"] ?? 30);
+if (!Number.isInteger(retentionDays) || retentionDays < 0) {
+  log("--retention-days must be a whole number of days (0 keeps everything)");
+  process.exit(2);
+}
+
 const defaults = defaultPaths();
 const configDir = values["config-dir"] ?? defaults.config;
 const dataDir = values["data-dir"] ?? defaults.data;
 await mkdir(dataDir, { recursive: true, mode: 0o700 });
+await prune(dataDir, retentionDays).catch(error => log("cleanup failed:", (error as Error).message));
 
 const launchDir = values["launch-user-data-dir"];
 const browser = new BrowserManager({

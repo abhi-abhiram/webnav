@@ -295,7 +295,11 @@ export async function act(page: Page, input: ActInput): Promise<void> {
     case "focus": return need().focus();
     case "scroll":
       if (target) return target.scrollIntoViewIfNeeded();
-      return page.mouse.wheel(0, Number(value) || 600);
+      {
+        const pixels = input.value === undefined || input.value === "" ? 600 : Number(input.value);
+        if (!Number.isFinite(pixels)) throw new Error(`scroll value must be a number of pixels, got ${JSON.stringify(input.value)}`);
+        return page.mouse.wheel(0, pixels);
+      }
   }
 }
 

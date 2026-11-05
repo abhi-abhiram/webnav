@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { mkdir, readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { act, actions, pageState, settle, snapshot, snapshotChanges, type BrowserManager } from "./browser.ts";
@@ -10,7 +11,8 @@ import { Artifacts } from "./artifacts.ts";
 import { policySchema, withPolicy } from "./policy.ts";
 import type { Page } from "playwright-core";
 
-export const version = "0.1.0";
+// package.json is the single source of the version.
+export const version: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 type Deps = { browser: BrowserManager; sites: Sites; runner: Runner; dataDir: string; browserTools: boolean };
 
@@ -28,7 +30,7 @@ function guarded(notices: () => string[]) {
     try {
       result = await fn(args, extra);
     } catch (error) {
-      result = { isError: true, content: [{ type: "text", text: (error as Error).message ?? String(error) }] };
+      result = { isError: true, content: [{ type: "text", text: (error as Error)?.message ?? String(error) }] };
     }
     const pending = notices();
     if (pending.length) result.content = [...result.content, { type: "text", text: `notices:\n- ${pending.join("\n- ")}` }];
@@ -164,10 +166,10 @@ export function createServer({ browser, sites, runner, dataDir, browserTools }: 
     }, safe(async (a, extra: Extra) => scopedUse(extra.signal, undefined, async page => {
       await mkdir(join(dataDir, "screenshots"), { recursive: true, mode: 0o700 });
       const path = join(dataDir, "screenshots", `shot-${Date.now()}.png`);
-      await page.screenshot({ path, fullPage: a.full_page });
+      const image = await page.screenshot({ path, fullPage: a.full_page });
       return {
         content: [
-          { type: "image", data: (await readFile(path)).toString("base64"), mimeType: "image/png" },
+          { type: "image", data: image.toString("base64"), mimeType: "image/png" },
           { type: "text", text: path },
         ],
       };

@@ -54,6 +54,12 @@ export type CheckResult = Pick<RunResult, "ok" | "ms" | "error" | "at" | "snapsh
 
 type Current = { site: string; name: string; start: number; page: Page; log: string[]; abort: AbortController };
 
+// Query strings and fragments often carry tokens; the run log keeps only origin and path.
+function logUrl(url: string | undefined): string | undefined {
+  if (!url) return url;
+  try { const u = new URL(url); return u.protocol.startsWith("http") ? u.origin + u.pathname : u.protocol; } catch { return undefined; }
+}
+
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-");
 
 // Rejects when the signal aborts, so a run can stop waiting for a function that does not return.
@@ -316,7 +322,7 @@ export class Runner {
     if (!result.ok) result.dependents = await this.sites.dependents(site, name);
     await this.sites.recordRun(site, {
       t: new Date().toISOString(), name, ok: result.ok, ms: result.ms,
-      ...(result.error ? { error: result.error.split("\n")[0] } : {}), url: result.state?.url,
+      ...(result.error ? { error: result.error.split("\n")[0] } : {}), url: logUrl(result.state?.url),
     });
     return this.publish(result, opts);
   }

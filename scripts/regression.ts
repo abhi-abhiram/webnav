@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { Artifacts, project } from "../src/artifacts.ts";
 import { assertSchema, canonical } from "../src/contracts.ts";
 import { assertUrl, policySchema, withPolicy, PolicyError } from "../src/policy.ts";
-import { Sites } from "../src/sites.ts";
+import { Sites, siteKey } from "../src/sites.ts";
+import { compactRunLog, prune } from "../src/retention.ts";
+import { siteOrigin } from "../src/helpers.ts";
 import { Runner } from "../src/runner.ts";
 import { loginSuspected, validateEndpoint, BrowserManager } from "../src/browser.ts";
 import type { Page } from "playwright-core";
@@ -237,5 +239,31 @@ let calls=0; export async function run({args}){return {calls:++calls,value:args.
   const beforeInvalidPolicy=uses;
   await assert.rejects(runner.run(site,"expiring"));
   assert.equal(uses,beforeInvalidPolicy,"malformed policy fails before browser access");
+  // Site keys keep IPv6 literals; the guard maps hosts the same way.
+  assert.equal(siteKey("http://[::1]:3000/x"), "[::1]_3000");
+  assert.equal(siteOrigin("[::1]_3000"), "http://[::1]:3000");
+  assert.equal(siteOrigin("192.168.1.5_8080"), "http://192.168.1.5:8080");
+  assert.equal(siteOrigin("127.example.com"), "https://127.example.com");
+  assert.doesNotThrow(() => assertUrl("[::1]_3000", policySchema.parse({}), "http://[::1]:3000/a"));
+  // find offsets stay aligned when case folding changes length.
+  const folded = await artifacts.save("İ".repeat(300) + "NEEDLE");
+  const hit = await artifacts.read(folded.id, 0, 400, "needle");
+  assert.ok(hit.text!.endsWith("NEEDLE"), "find must point at the original text");
+  // Concurrent saves to one site serialize instead of failing on git's index.lock.
+  await Promise.all(Array.from({ length: 6 }, (_, i) => sites.save("parallel.test", `f${i}`, `export const meta={description:"P${i}"};export async function run(){}`)));
+  assert.equal((await sites.names("parallel.test")).length, 6);
+  // Run logs are compacted, keeping each function's last record.
+  const runLines = [JSON.stringify({ name: "rare", ok: true }), ...Array.from({ length: 6000 }, (_, i) => JSON.stringify({ name: "busy", i }))];
+  const compacted = compactRunLog(runLines.join("\n") + "\n")!.trim().split("\n");
+  assert.equal(compacted.length, 1001);
+  assert.equal(JSON.parse(compacted[0]).name, "rare");
+  assert.equal(compactRunLog(runLines.slice(0, 10).join("\n")), null);
+  // Retention removes old evidence files only.
+  const old = new Date(Date.now() - 40 * 86_400_000);
+  const { utimes } = await import("node:fs/promises");
+  await utimes(join(root, "data", "artifacts", `${folded.id}.json`), old, old);
+  await prune(join(root, "data"), 30);
+  await assert.rejects(artifacts.read(folded.id), /ENOENT/);
+  await artifacts.read(recoverable.artifact!.id);
   console.error("regression ok");
 } finally { await rm(root,{recursive:true,force:true}); }
