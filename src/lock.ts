@@ -11,7 +11,7 @@ function alive(pid: number): boolean {
 }
 
 // Cross-process lock so agents sharing one Chrome take turns driving it.
-export async function withFileLock<T>(path: string, timeoutMs: number, fn: () => Promise<T>): Promise<T> {
+export async function withFileLock<T>(path: string, timeoutMs: number, fn: () => Promise<T>, what = "browser"): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
@@ -30,7 +30,7 @@ export async function withFileLock<T>(path: string, timeoutMs: number, fn: () =>
         if (again === pid) await rm(path, { force: true });
         continue;
       }
-      if (Date.now() > deadline) throw new Error(`browser is busy (lock held by pid ${pid || "unknown"})`);
+      if (Date.now() > deadline) throw new Error(`${what} is busy (lock held by pid ${pid || "unknown"})`);
       await sleep(100);
     }
   }

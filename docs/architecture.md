@@ -31,7 +31,8 @@ Running a function is its own test. Optional argument/result contracts and `veri
 ## Functions
 - TypeScript runs without a build step (Node type stripping), so use only erasable syntax. Modules are imported with a content-hash query, so an edited file reloads without a restart.
 - `fn_save` imports the module to validate its shape, restores the previous file if that fails, and commits it to the site's git repo as `webnav <webnav@localhost>`.
-- The run log (`runs/<host>.jsonl`) is append-only and supplies `last_run` in `site_get`.
+- The run log (`runs/<host>.jsonl`) supplies `last_run` in `site_get`. It records origin and path only (queries may carry tokens). At startup `retention.ts` compacts long logs, keeping recent lines and each function's last record, and deletes artifacts, screenshots and videos older than `--retention-days`. Site folders are never pruned.
+- Writes to a site's files and git repo take `locks/<host>.lock` in the data dir, so processes saving to the same site do not collide on git's index.
 - A run stops on timeout, `fn_abort` or client cancellation. Queued functions and browser tools recheck client cancellation after lock acquisition before executing user actions. An already-running promise cannot be cancelled, so webnav closes an active run's tab: pending and later Playwright calls fail, and the lock is released. The next call opens a new tab.
 - `log()` lines are kept for `fn_status` and sent as MCP progress notifications when the client asks for progress.
 - Explicit full failure snapshots list open dialogs before the page; denied pages never trigger DOM/title/screenshot diagnostics.

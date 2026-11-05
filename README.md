@@ -47,6 +47,7 @@ Optionally install the workflow skill: `pi install /absolute/path/to/webnav`.
 | `--cdp-endpoint <url>` | Explicit local `http://` or `ws://` endpoint. Also read from `WEBNAV_CDP_ENDPOINT`; `browser_open { cdp_endpoint }` switches a running session. |
 | `--browser-executable <path>` | Browser binary, if it is not found automatically (used to open a window in a profile). |
 | `--launch-user-data-dir <dir>` | **Opt-in only:** launch a headless browser with this user data dir instead of attaching. |
+| `--retention-days <n>` | Delete artifacts, screenshots and videos older than n days at startup (default 30; 0 keeps them). |
 | `--no-browser-tools` | Hide `browser_*` tools, e.g. when pi-browser-harness does the exploring. |
 
 webnav opens its own tab and never reads cookies or credentials. When a page looks like a login, it reports `login_suspected` and the agent asks you to sign in. Onboarding under `/auth/` alone is not treated as a login. The `Default` profile uses a new tab directly; selecting another profile may open a window and must be explicitly authorized for focus-safe/headless workflows. A failed profile selection stops rather than silently falling back to different logins. Browser actions such as opening a profile window are reported under `notices`.
@@ -64,13 +65,14 @@ Both attach to the same running browser over CDP, and each keeps to its own tabs
   policy.json                       # optional reviewed path scope / write approval
   functions/<name>.ts               # reusable functions
 ~/.local/share/webnav/
-  runs/<host>.jsonl                 # run log (last result per function)
+  runs/<host>.jsonl                 # run log (origin + path only; compacted at startup)
   artifacts/<uuid>.json             # private complete results; bounded retrieval
-  screenshots/  videos/  tmp/
+  screenshots/  videos/  tmp/       # pruned at startup (see --retention-days)
   browser.lock                      # serializes browser use across processes
+  locks/<host>.lock                 # serializes writes to one site's files and git repo
 ```
 
-`<host>` is the URL host, with `:port` written as `_port` (e.g. `localhost_3000`). Override the directories with `--config-dir` and `--data-dir` (absolute paths).
+`<host>` is the URL host, with `:port` written as `_port` (e.g. `localhost_3000`, `[::1]_3000`). Override the directories with `--config-dir` and `--data-dir` (absolute paths).
 
 A function:
 

@@ -9,6 +9,7 @@ import type { Locator, Page } from "playwright-core";
 import { hostKey, type Item } from "./helpers.ts";
 import { validateContracts, type Contracts } from "./contracts.ts";
 import { policySchema, type SitePolicy } from "./policy.ts";
+import { withFileLock } from "./lock.ts";
 
 const exec = promisify(execFile);
 
@@ -111,7 +112,19 @@ export class Sites {
     return this.git(site, "rev-parse", "--short", "HEAD");
   }
 
+  // Serializes changes to one site's files and git index across webnav processes sharing the
+  // data dir; concurrent commits would otherwise fail on git's index.lock. Not re-entrant.
+  private async writing<T>(site: string, fn: () => Promise<T>): Promise<T> {
+    const dir = join(this.dataDir, "locks");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    return withFileLock(join(dir, `${siteKey(site)}.lock`), 30_000, fn, `site ${siteKey(site)}`);
+  }
+
   async ensure(site: string): Promise<string> {
+    return this.writing(site, () => this.ensureUnlocked(site));
+  }
+
+  private async ensureUnlocked(site: string): Promise<string> {
     const key = siteKey(site);
     const dir = this.dir(key);
     await mkdir(join(dir, "functions"), { recursive: true });
@@ -137,9 +150,11 @@ export class Sites {
 
   async writePolicy(site: string, value: unknown, message?: string): Promise<string | null> {
     const policy = policySchema.parse(value);
-    const key = await this.ensure(site);
-    await writeFile(join(this.dir(key), "policy.json"), JSON.stringify(policy, null, 2) + "\n");
-    return this.commit(key, `policy: ${message ?? "update scope"}`);
+    return this.writing(site, async () => {
+      const key = await this.ensureUnlocked(site);
+      await writeFile(join(this.dir(key), "policy.json"), JSON.stringify(policy, null, 2) + "\n");
+      return this.commit(key, `policy: ${message ?? "update scope"}`);
+    });
   }
 
   // Include every function and shared UI/policy so nested-call edits invalidate cached reads.
@@ -156,9 +171,11 @@ export class Sites {
   }
 
   async writeNotes(site: string, markdown: string, message?: string): Promise<string | null> {
-    const key = await this.ensure(site);
-    await writeFile(join(this.dir(key), "notes.md"), markdown);
-    return this.commit(key, `notes: ${message ?? "update"}`);
+    return this.writing(site, async () => {
+      const key = await this.ensureUnlocked(site);
+      await writeFile(join(this.dir(key), "notes.md"), markdown);
+      return this.commit(key, `notes: ${message ?? "update"}`);
+    });
   }
 
   async names(site: string): Promise<string[]> {
@@ -197,34 +214,38 @@ export class Sites {
 
   // Writes, validates by importing, and commits. Invalid code is rolled back.
   async save(site: string, name: string, code: string, message?: string): Promise<{ commit: string | null; warnings: string[] }> {
-    const key = await this.ensure(site);
-    const file = this.file(key, name);
-    const previous = existsSync(file) ? await readFile(file, "utf8") : null;
-    await writeFile(file, code);
-    try {
-      if (name === "ui") await this.loadUi(key);
-      else await this.load(key, name);
-    } catch (error) {
-      if (previous === null) await rm(file, { force: true });
-      else await writeFile(file, previous);
-      throw new Error(`not saved: ${(error as Error).message}`);
-    }
-    const warnings: string[] = [];
-    // A function that delegates with call() inherits the proof from the function it calls.
-    if (name !== "ui" && !/waitFor|expect\(|toBeVisible|toHaveURL|items\(|\bcall\(/.test(code)) {
-      warnings.push("no final wait found: end with a wait that proves the result (e.g. a heading or row .waitFor())");
-    }
-    const verb = previous === null ? "add" : "update";
-    const commit = await this.commit(key, `${name === "ui" ? "ui" : `fn(${name})`}: ${message ?? verb}`);
-    return { commit, warnings };
+    return this.writing(site, async () => {
+      const key = await this.ensureUnlocked(site);
+      const file = this.file(key, name);
+      const previous = existsSync(file) ? await readFile(file, "utf8") : null;
+      await writeFile(file, code);
+      try {
+        if (name === "ui") await this.loadUi(key);
+        else await this.load(key, name);
+      } catch (error) {
+        if (previous === null) await rm(file, { force: true });
+        else await writeFile(file, previous);
+        throw new Error(`not saved: ${(error as Error).message}`);
+      }
+      const warnings: string[] = [];
+      // A function that delegates with call() inherits the proof from the function it calls.
+      if (name !== "ui" && !/waitFor|expect\(|toBeVisible|toHaveURL|items\(|\bcall\(/.test(code)) {
+        warnings.push("no final wait found: end with a wait that proves the result (e.g. a heading or row .waitFor())");
+      }
+      const verb = previous === null ? "add" : "update";
+      const commit = await this.commit(key, `${name === "ui" ? "ui" : `fn(${name})`}: ${message ?? verb}`);
+      return { commit, warnings };
+    });
   }
 
   async remove(site: string, name: string, message?: string): Promise<string | null> {
     if (name === "ui") throw new Error("ui.ts cannot be deleted; empty it instead");
     const file = this.file(site, name);
-    if (!existsSync(file)) throw new Error(`unknown function ${name}; see site_get`);
-    await rm(file);
-    return this.commit(siteKey(site), `fn(${name}): ${message ?? "remove"}`);
+    return this.writing(site, async () => {
+      if (!existsSync(file)) throw new Error(`unknown function ${name}; see site_get`);
+      await rm(file);
+      return this.commit(siteKey(site), `fn(${name}): ${message ?? "remove"}`);
+    });
   }
 
   async dependents(site: string, name: string): Promise<string[]> {

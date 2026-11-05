@@ -13,6 +13,7 @@
 - src/browser.ts: attach/launch, profile tab, lock use, snapshot, actions.
 - src/runner.ts: running saved and draft functions, failure details, recording.
 - src/sites.ts: per-site files, validation, git commits, run log.
+- src/retention.ts: startup cleanup of old artifacts, screenshots, videos and run-log lines.
 - skills/webnav: agent workflow (explore → capture → reuse → repair).
 
 ## Invariants

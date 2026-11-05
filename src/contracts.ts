@@ -68,6 +68,14 @@ function compile(input: unknown, depth = 0): z.ZodType {
   return result;
 }
 
+// Schemas live on imported meta objects, which are reused until their file changes.
+const compiled = new WeakMap<object, z.ZodType>();
+function compiledSchema(schema: Schema): z.ZodType {
+  let parser = compiled.get(schema);
+  if (!parser) compiled.set(schema, parser = compile(schema));
+  return parser;
+}
+
 export function validateContracts(meta: Contracts & { safe?: boolean }): void {
   if (meta.safe !== undefined && typeof meta.safe !== "boolean") throw new Error("meta.safe must be a boolean");
   if (meta.effect !== undefined && !["read", "write"].includes(meta.effect)) throw new Error("meta.effect must be read or write");
@@ -75,12 +83,12 @@ export function validateContracts(meta: Contracts & { safe?: boolean }): void {
   if (meta.cacheTtlMs !== undefined && (meta.effect !== "read" || !Number.isInteger(meta.cacheTtlMs) || meta.cacheTtlMs < 1 || meta.cacheTtlMs > 3_600_000)) throw new Error("meta.cacheTtlMs requires effect: read and must be 1–3600000");
   for (const schema of [meta.argsSchema, meta.resultSchema]) if (schema !== undefined) {
     if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw new Error("contract schemas must be JSON Schema objects");
-    compile(schema);
+    compiledSchema(schema);
   }
 }
 export function assertSchema(schema: Schema | undefined, value: unknown, label: string): void {
   if (!schema) return;
-  const result = compile(schema).safeParse(value);
+  const result = compiledSchema(schema).safeParse(value);
   if (!result.success) throw new Error(`${label}: ${result.error.issues.slice(0, 8).map(i => `${i.path.join(".") || "root"}: ${i.message}`).join("; ").slice(0, 1800)}`);
 }
 // Stable keys: object insertion order is irrelevant; array order is not.
